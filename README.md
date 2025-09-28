@@ -1,5 +1,14 @@
 # Lynecode
 
+```text
+    ██╗  ██╗   ██╗███╗   ██╗███████╗     ██████╗ ██████╗ ██████╗ ███████╗
+    ██║  ╚██╗ ██╔╝████╗  ██║██╔════╝    ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+    ██║   ╚████╔╝ ██╔██╗ ██║█████╗      ██║     ██║   ██║██║  ██║█████╗  
+    ██║    ╚██╔╝  ██║╚██╗██║██╔══╝      ██║     ██║   ██║██║  ██║██╔══╝  
+    ███████╗██║   ██║ ╚████║███████╗    ╚██████╗╚██████╔╝██████╔╝███████╗
+    ╚══════╝╚═╝   ╚═╝  ╚═══╝╚══════╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+```
+
 Lynecode is an AI coding assistant from LyneLabs. It brings a fast terminal UI, built-in project indexing, an opinionated toolset, and optional AI models (OpenAI, Gemini, Azure OpenAI) with your keys. Run it on any folder and work from a powerful chat workflow.
 
 ## Why Lynecode is different
