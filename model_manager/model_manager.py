@@ -24,6 +24,8 @@ class ModelManager:
     Supports:
     - OpenAI models (GPT series)
     - Google Gemini models
+    - Azure OpenAI deployments
+    - OpenRouter unified API models
     - Model availability validation based on API keys
     - Unified interface for different providers
     """
@@ -36,14 +38,16 @@ class ModelManager:
             self.providers = {
                 "openai": None,
                 "gemini": None,
-                "azure": None
+                "azure": None,
+                "openrouter": None
             }
 
             self.model_list = self._load_model_list()
             self.default_models = {
                 "openai": "gpt-4.1",
                 "gemini": "gemini-2.5-flash",
-                "azure": "Azure Model"
+                "azure": "Azure Model",
+                "openrouter": "x-ai/grok-4-fast:free"
             }
 
             self._initialize_providers()
@@ -66,7 +70,11 @@ class ModelManager:
             "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini",
             "gemini-2.5-flash", "gemini-2.5-flash-thinking",
             "gemini-2.5-pro", "gemini-2.5-pro-thinking",
-            "Azure Model"
+            "Azure Model",
+            "x-ai/grok-4-fast:free",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-sonnet",
+            "meta-llama/llama-3.1-8b-instruct"
         ]
         log_success(
             f"Loaded hardcoded model list with {len(models)} models", logger)
@@ -86,6 +94,10 @@ class ModelManager:
             if config_manager.get_key("gemini-api-key"):
                 self.providers["gemini"] = True
                 log_success("Gemini provider available", logger)
+
+            if config_manager.get_key("openrouter-api-key"):
+                self.providers["openrouter"] = True
+                log_success("OpenRouter provider available", logger)
 
             if (config_manager.get_key("azure-api-key") and
                 config_manager.get_key("azure-endpoint") and
@@ -165,6 +177,8 @@ class ModelManager:
         Returns:
             Provider name or None if not found
         """
+        if "/" in model_name or ":" in model_name:
+            return "openrouter"
         if "gpt" in model_name.lower() or "openai" in model_name.lower():
             return "openai"
         elif "gemini" in model_name.lower() or "google" in model_name.lower():
@@ -218,6 +232,13 @@ class ModelManager:
                 from model_manager.azure_adapter import AzureAdapter
                 adapter = AzureAdapter(
                     api_key=api_key, endpoint=azure_endpoint, api_version=azure_api_version, deployment=azure_deployment)
+            elif provider_name == "openrouter":
+                api_key = config_manager.get_key("openrouter-api-key")
+                referer = config_manager.get_key("openrouter-referer")
+                title = config_manager.get_key("openrouter-title")
+                from model_manager.openrouter_adapter import OpenRouterAdapter
+                adapter = OpenRouterAdapter(
+                    api_key=api_key, model=model_name, referer=referer, title=title)
             else:
                 log_error(
                     Exception(f"Unknown provider: {provider_name}"), "", logger)
@@ -247,6 +268,8 @@ class ModelManager:
             return self.default_models["openai"]
         elif "azure" in available_providers:
             return self.default_models["azure"]
+        elif "openrouter" in available_providers:
+            return self.default_models["openrouter"]
         elif "gemini" in available_providers:
             return self.default_models["gemini"]
         else:
@@ -334,7 +357,7 @@ class ModelManager:
                 return result
 
             placeholder_values = ["your_openai_api_key_here",
-                                  "your_gemini_api_key_here", "your_azure_api_key_here", "your-api-key-here", ""]
+                                  "your_gemini_api_key_here", "your_azure_api_key_here", "your_openrouter_api_key_here", "your-api-key-here", ""]
             if api_key.lower() in placeholder_values:
                 result[
                     "error"] = f"API key appears to be a placeholder. Use the API Configuration menu to set your actual {provider_name.upper()} API key."

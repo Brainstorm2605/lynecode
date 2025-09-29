@@ -129,21 +129,23 @@ class APIConfigMenu:
                 elif choice == 2:
                     self._handle_gemini_setup()
                 elif choice == 3:
-                    self._handle_azure_setup()
+                    self._handle_openrouter_setup()
                 elif choice == 4:
-                    self._handle_view_config()
+                    self._handle_azure_setup()
                 elif choice == 5:
-                    self._handle_delete_key()
+                    self._handle_view_config()
                 elif choice == 6:
-                    self._handle_clear_all()
+                    self._handle_delete_key()
                 elif choice == 7:
+                    self._handle_clear_all()
+                elif choice == 8:
                     self._show_message("🔙 Returning to main menu...")
                     break
                 else:
-                    self._show_error("Invalid choice. Please select 1-7.")
+                    self._show_error("Invalid choice. Please select 1-8.")
                     continue
 
-                if choice != 7:
+                if choice != 8:
                     self._ask_next_action()
 
         except KeyboardInterrupt:
@@ -160,11 +162,12 @@ class APIConfigMenu:
         menu_text.append("Choose an option:\n\n", style="white")
         menu_text.append("1. 🔑 Set OpenAI API Key\n", style="green")
         menu_text.append("2. 💎 Set Gemini API Key\n", style="blue")
-        menu_text.append("3. ☁️  Set Azure Configuration\n", style="magenta")
-        menu_text.append("4. 👁️  View Current Configuration\n", style="cyan")
-        menu_text.append("5. 🗑️  Delete Specific Key\n", style="red")
-        menu_text.append("6. 🧹 Clear All Configuration\n", style="red bold")
-        menu_text.append("7. 🔙 Back to Main Menu\n", style="yellow")
+        menu_text.append("3. 🌐 Set OpenRouter Credentials\n", style="cyan")
+        menu_text.append("4. ☁️  Set Azure Configuration\n", style="magenta")
+        menu_text.append("5. 👁️  View Current Configuration\n", style="cyan")
+        menu_text.append("6. 🗑️  Delete Specific Key\n", style="red")
+        menu_text.append("7. 🧹 Clear All Configuration\n", style="red bold")
+        menu_text.append("8. 🔙 Back to Main Menu\n", style="yellow")
 
         if RICH_AVAILABLE:
             console.print(Panel(
@@ -180,11 +183,12 @@ class APIConfigMenu:
             print("="*50)
             print("1. 🔑 Set OpenAI API Key")
             print("2. 💎 Set Gemini API Key")
-            print("3. ☁️  Set Azure Configuration")
-            print("4. 👁️  View Current Configuration")
-            print("5. 🗑️  Delete Specific Key")
-            print("6. 🧹 Clear All Configuration")
-            print("7. 🔙 Back to Main Menu")
+            print("3. 🌐 Set OpenRouter Credentials")
+            print("4. ☁️  Set Azure Configuration")
+            print("5. 👁️  View Current Configuration")
+            print("6. 🗑️  Delete Specific Key")
+            print("7. 🧹 Clear All Configuration")
+            print("8. 🔙 Back to Main Menu")
             print("="*50)
 
     def _show_welcome(self):
@@ -306,6 +310,88 @@ class APIConfigMenu:
         except Exception as e:
             self._show_error(f"❌ Error setting API key: {e}")
 
+    def _handle_openrouter_setup(self):
+        """Handle OpenRouter API configuration, including optional headers."""
+        if RICH_AVAILABLE:
+            console.print("\n[bold cyan]🌐 OpenRouter API Setup[/bold cyan]")
+        else:
+            print("\n🌐 OpenRouter API Setup")
+
+        try:
+            current_key = self.config_manager.get_key("openrouter-api-key")
+            current_referer = self.config_manager.get_key("openrouter-referer")
+            current_title = self.config_manager.get_key("openrouter-title")
+
+            if current_key:
+                masked = self.config_manager._mask_value(current_key)
+                print(f"📝 Current OpenRouter API Key: {masked}")
+                print("Enter a new key to update, or press Enter to keep current:")
+
+            if RICH_AVAILABLE:
+                try:
+                    key = Prompt.ask("🔑 OpenRouter API Key")
+                    if key is None:
+                        key = ""
+                except KeyboardInterrupt:
+                    key = ""
+            else:
+                key = input("🔑 OpenRouter API Key: ").strip()
+
+            if key:
+                self.config_manager.set_key("openrouter-api-key", key)
+                self._show_success("✅ OpenRouter API key updated successfully!")
+            elif current_key:
+                self._show_message("✅ Kept existing OpenRouter API key.")
+            else:
+                self._show_error("❌ No API key provided.")
+                return
+
+            print("\nℹ️  HTTP Referer and X-Title headers are optional but help OpenRouter attribute your app.")
+            print("    Enter '-' to clear an existing value.")
+
+            if RICH_AVAILABLE:
+                try:
+                    referer = Prompt.ask(
+                        "🌐 HTTP Referer (optional)",
+                        default=current_referer or ""
+                    )
+                    title = Prompt.ask(
+                        "📝 X-Title (optional)",
+                        default=current_title or ""
+                    )
+                    referer = referer or ""
+                    title = title or ""
+                except KeyboardInterrupt:
+                    referer = current_referer or ""
+                    title = current_title or ""
+            else:
+                referer_prompt = f"🌐 HTTP Referer (optional) [{current_referer or 'none'}]: "
+                title_prompt = f"📝 X-Title (optional) [{current_title or 'none'}]: "
+                referer = input(referer_prompt).strip()
+                title = input(title_prompt).strip()
+
+            def _apply_optional(value: str, current: Optional[str], key_name: str, label: str):
+                trimmed = (value or "").strip()
+                if trimmed == "-":
+                    if current:
+                        self.config_manager.delete_key(key_name)
+                        self._show_message(f"🧹 Cleared {label}.")
+                    else:
+                        self._show_message(f"ℹ️ No existing {label} to clear.")
+                elif trimmed:
+                    self.config_manager.set_key(key_name, trimmed)
+                    self._show_success(f"✅ {label} saved.")
+                elif current:
+                    self._show_message(f"✅ Kept existing {label}.")
+
+            _apply_optional(referer, current_referer, "openrouter-referer", "HTTP Referer")
+            _apply_optional(title, current_title, "openrouter-title", "X-Title")
+
+        except KeyboardInterrupt:
+            self._show_message("⚠️ Operation cancelled.")
+        except Exception as e:
+            self._show_error(f"❌ Error setting OpenRouter configuration: {e}")
+
     def _handle_azure_setup(self):
         """Handle Azure configuration setup with clear flow."""
         if RICH_AVAILABLE:
@@ -421,7 +507,7 @@ class APIConfigMenu:
                 empty_config.append(
                     "📭 No API keys configured yet.\n", style="yellow")
                 empty_config.append(
-                    "💡 Use options 1-3 to set up your API keys.", style="dim cyan")
+                    "💡 Use options 1-4 to set up your API credentials.", style="dim cyan")
 
                 console.print(Panel(
                     empty_config,
@@ -437,7 +523,7 @@ class APIConfigMenu:
                     print(f"  {key}: {value}")
             else:
                 print("\n📭 No API keys configured yet.")
-                print("💡 Use options 1-3 to set up your API keys.")
+                print("💡 Use options 1-4 to set up your API credentials.")
 
     def _handle_delete_key(self):
         """Handle deleting a specific key."""
@@ -563,15 +649,15 @@ class APIConfigMenu:
         while True:
             try:
                 if RICH_AVAILABLE:
-                    choice = Prompt.ask("Select option (1-7)", default="7")
+                    choice = Prompt.ask("Select option (1-8)", default="8")
                 else:
-                    choice = input("Select option (1-7) [7]: ").strip() or "7"
+                    choice = input("Select option (1-8) [8]: ").strip() or "8"
 
                 choice_num = int(choice)
-                if 1 <= choice_num <= 7:
+                if 1 <= choice_num <= 8:
                     return choice_num
                 else:
-                    self._show_error("Please enter a number between 1 and 7.")
+                    self._show_error("Please enter a number between 1 and 8.")
             except KeyboardInterrupt:
                 raise
             except ValueError:
