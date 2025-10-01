@@ -57,6 +57,7 @@ Supported providers (bring your own keys):
 - OpenAI (e.g., `gpt-4.1`, `gpt-5`)
 - Google Gemini (e.g., `gemini-2.5-flash`, `gemini-2.5-pro`, with optional “-thinking” variants)
 - Azure OpenAI (your deployment name)
+- OpenRouter (e.g., `x-ai/grok-4-fast:free`, `openai/gpt-4o` via OpenRouter)
 
 ## Configure API keys (secure, menu-driven)
 Launch the API Configuration from the navigation menu:
