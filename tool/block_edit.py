@@ -405,7 +405,7 @@ def block_edit_file(file_path: str, old_string: str, new_string: str) -> tuple[b
             diff = generate_diff(original_content, new_content, file_path)
             if diff:
                 logger.info(
-                    f"Applying changes to {Path(file_path).name}:\n{diff}")
+                    f"Applying changes to {Path(file_path).name}:\n")
             else:
                 logger.warning("No changes detected in the edit")
                 return False, f"No changes detected in the edit\n📊 Tool call parameters: file_path='{file_path}', old_string={repr(old_string)}, new_string={repr(new_string)}"

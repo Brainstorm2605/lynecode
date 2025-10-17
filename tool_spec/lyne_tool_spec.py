@@ -167,21 +167,21 @@ LYNE_TOOL_SPEC = [
     {
         "name": "fetch_content",
         "module": "tool.read",
-        "description": "Read file content with line range support. Can't read binary files at all and utf-8 for handling encoding issues gracefully.",
+        "description": "Read file content with precise control. Supports range reads or full reads (up to ~1000 lines in one go). Automatically rejects binary files.",
         "parameters": [
             {"name": "file_path", "type": "str", "required": True,
                 "description": "Path to the file to read."},
             {"name": "start_line", "type": "int", "required": False, "default": 1,
                 "description": "Starting line number (1-indexed, default: 1)."},
             {"name": "end_line", "type": "int", "required": False, "default": 200,
-                "description": "Ending line number (inclusive, default: 200)."}
+                "description": "Ending line number (inclusive). Leave empty to stream from start."}
         ],
         "use_cases": [
             "When you need to read the content of a single file.",
             "When you want to read only a specific section of a file.",
+            "When you need to examine the full file.",
             "When you need to extract content from a file for processing or analysis.",
-            "When you want to read file content without loading the entire file.",
-            "When you need to examine the contents of a file to understand its structure."
+            "When you want to read file content without loading the entire file or binary data."
         ]
     },
     {

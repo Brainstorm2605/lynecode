@@ -146,20 +146,79 @@ class Agent:
             return fallback_response
 
         json_text = self._extract_json(cleaned_text)
-        if json_text != text:
+        if json_text:
             try:
                 parsed = json.loads(json_text)
                 if isinstance(parsed, dict) and "action" in parsed:
-
                     if parsed["action"] in ["call_tool", "summaries", "plan"]:
                         return self._validate_and_fix_response_structure(parsed)
-                    else:
-
-                        parsed["action"] = "summaries"
-                        parsed["summary"] = f"Invalid action type detected - converted to summaries"
-                        return self._validate_and_fix_response_structure(parsed)
+                    parsed["action"] = "summaries"
+                    parsed["summary"] = (
+                        "Invalid action type detected - converted to summaries"
+                    )
+                    return self._validate_and_fix_response_structure(parsed)
+                return self._validate_and_fix_response_structure(parsed)
             except json.JSONDecodeError:
-                pass
+                decoder = json.JSONDecoder()
+                idx = 0
+                length = len(json_text)
+                collected = []
+
+                while idx < length:
+                    while idx < length and json_text[idx].isspace():
+                        idx += 1
+                    if idx >= length:
+                        break
+                    if json_text[idx] == ',':
+                        idx += 1
+                        continue
+                    try:
+                        obj, next_idx = decoder.raw_decode(json_text, idx)
+                        collected.append(obj)
+                        idx = next_idx
+                    except json.JSONDecodeError:
+                        collected = []
+                        break
+
+                if collected:
+                    primary = None
+                    extra_calls = []
+                    for obj in collected:
+                        if (
+                            isinstance(obj, dict)
+                            and primary is None
+                            and "action" in obj
+                        ):
+                            primary = obj
+                        else:
+                            extra_calls.append(obj)
+
+                    if primary is None:
+                        primary = {"action": "call_tool", "tool_calls": []}
+
+                    tool_calls = primary.get("tool_calls", [])
+                    if not isinstance(tool_calls, list):
+                        tool_calls = [tool_calls] if tool_calls else []
+
+                    for call in extra_calls:
+                        if isinstance(call, dict):
+                            if "tool_name" in call:
+                                tool_calls.append(call)
+                            elif "function" in call:
+                                tool_calls.append(
+                                    {
+                                        "tool_name": call.get(
+                                            "function", "unknown"
+                                        ),
+                                        "parameters": call.get(
+                                            "parameters",
+                                            call.get("args", {}),
+                                        ),
+                                    }
+                                )
+
+                    primary["tool_calls"] = tool_calls
+                    return self._validate_and_fix_response_structure(primary)
 
         double_brace_match = re.search(r'\{\{\s*({[\s\S]*?})\s*\}\}', cleaned_text)
         if double_brace_match:
@@ -1289,45 +1348,69 @@ class Agent:
             {planner_prompt}
             """
 
-            response = self._call_llm(planning_prompt, max_tokens=1024)
-            if not response:
-                return False
+            max_attempts = 2
+            attempt = 0
 
-            result_data = self._extract_json_from_response(response)
-            if not result_data or not isinstance(result_data, dict):
-                log_error(Exception("Invalid planning result format"),
-                          "Planning result is not a valid JSON object", logger)
-                return False
+            while attempt < max_attempts:
+                response = self._call_llm(planning_prompt, max_tokens=1024)
+                if not response:
+                    attempt += 1
+                    continue
 
-            action_type = result_data.get("action")
+                result_data = self._extract_json_from_response(response)
+                if not result_data or not isinstance(result_data, dict):
+                    log_error(Exception("Invalid planning result format"),
+                              "Planning result is not a valid JSON object", logger)
+                    attempt += 1
+                    continue
 
-            if action_type == "plan":
+                action_type = str(result_data.get("action", "")).strip().lower()
+                if action_type != "plan":
+                    log_warning(
+                        f"Planner returned action '{action_type}' instead of 'plan' (attempt {attempt + 1}/{max_attempts})",
+                        logger
+                    )
+                    attempt += 1
+                    continue
 
                 plan = result_data.get("plan")
-                if not plan or not isinstance(plan, list) or len(plan) == 0:
+                if not plan or not isinstance(plan, list):
                     log_error(Exception("Invalid plan format"),
                               "Plan field is missing, empty, or not a list", logger)
-                    return False
+                    attempt += 1
+                    continue
 
-                self.planner_result = plan
-                self.remaining_plan = plan.copy()
+                normalized_plan = []
+                for milestone in plan:
+                    if isinstance(milestone, str) and milestone.strip():
+                        normalized_plan.append(milestone.strip())
+                    elif milestone is not None:
+                        normalized_plan.append(str(milestone).strip())
+
+                if not normalized_plan:
+                    log_error(Exception("Empty plan"),
+                              "Planner returned an empty plan after normalization", logger)
+                    attempt += 1
+                    continue
+
+                self.planner_result = normalized_plan
+                self.remaining_plan = normalized_plan.copy()
                 self.session_history.append({
                     "type": "planning",
                     "iteration": self.current_iteration,
-                    "result": plan,
+                    "result": normalized_plan,
                     "raw_response": response
                 })
 
                 log_success(
-                    f"Query planning completed with {len(plan)} milestones", logger)
+                    f"Query planning completed with {len(normalized_plan)} milestones", logger)
                 log_success(
                     f"Initialized remaining milestones: {self.remaining_plan}", logger)
                 return True
 
-            else:
-                log_error(Exception("Unknown action type"),
-                          f"Action type '{action_type}' is not supported", logger)
-                return False
+            log_error(Exception("Planner failed to produce a plan"),
+                      "All planner attempts returned invalid action", logger)
+            return False
 
         except Exception as e:
             log_error(e, "Error in query planning", logger)

@@ -27,7 +27,11 @@ def is_likely_text_file(file_path: Path) -> bool:
     return True
 
 
-def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> str:
+MAX_FULL_LINES = 1000
+MAX_FULL_CHARS = 32000
+
+
+def fetch_content(file_path: str, start_line: int = 1, end_line: int | None = 200) -> str:
     """
     Fetches content from a text-based file, preserving indentation and structure.
 
@@ -58,7 +62,7 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> s
                 f"Binary file detected: {file_path}"), "Binary file cannot be read", logger)
             return None
 
-        if start_line < 1 or end_line < start_line:
+        if start_line < 1:
             log_error(Exception("Invalid line range"),
                       "Invalid line range", logger)
             return None
@@ -80,13 +84,15 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> s
                     all_lines.append(line)
 
         total_lines = len(all_lines)
-        if file_size >= 102400 and total_lines <= end_line + 100:
+        if file_size >= 102400 and end_line is not None and total_lines <= end_line + 100:
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                 all_lines = f.readlines()
             total_lines = len(all_lines)
 
         if total_lines == 0:
             return f"FILE STATUS: The file '{file_path}' exists but is completely empty (no lines, size is 0 bytes). This is likely a fresh/empty file, no need to call fetch_content again on this path unless content is added later."
+
+        limit_lines = start_line == 1 and end_line is None
 
         start_index = start_line - 1
 
@@ -102,7 +108,16 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> s
 
             logger.info(f"Line range fallback: {warning_message.strip()}")
 
-        end_index = min(end_line, total_lines)
+        if limit_lines:
+            end_index = min(total_lines, start_index + MAX_FULL_LINES)
+        else:
+            end_line_value = end_line if end_line is not None else start_line + 199
+            if end_line_value < start_line:
+                log_error(Exception("Invalid line range"),
+                          "Invalid line range", logger)
+                return None
+            end_index = min(end_line_value, total_lines)
+
         content_slice = all_lines[start_index:end_index]
 
         if not content_slice:
@@ -115,15 +130,21 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> s
         import io
 
         content_builder = io.StringIO()
+        char_count = 0
         for line in content_slice:
+            if limit_lines and char_count >= MAX_FULL_CHARS:
+                break
             content_builder.write(line)
+            char_count += len(line)
         content = content_builder.getvalue()
         content_builder.close()
 
         actual_end = min(end_line, total_lines)
         lines_read = len(content_slice)
 
-        if actual_end >= total_lines:
+        if limit_lines and (end_index >= total_lines or len(content_slice) < MAX_FULL_LINES and char_count < MAX_FULL_CHARS):
+            progress_info = f"\n{'='*80}\n📖 FILE DISPLAYED (up to {len(content.splitlines())} lines, {char_count} characters)\n{'='*80}"
+        elif actual_end >= total_lines:
             progress_info = f"\n{'='*80}\n📖 FILE FULLY READ - All {total_lines} lines displayed\n{'='*80}"
         else:
             lines_remaining = total_lines - actual_end
@@ -137,8 +158,12 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int = 200) -> s
                 f"Fallback read: {len(content_slice)} lines from {file_path} (lines {actual_start_line}-{actual_end} of {total_lines} - original request was {start_line}-{end_line})", logger)
             content = warning_message + content
         else:
-            log_success(
-                f"Successfully read {len(content_slice)} lines from {file_path} (lines {start_line}-{actual_end} of {total_lines})", logger)
+            if limit_lines:
+                log_success(
+                    f"Successfully read up to {len(content.splitlines())} lines ({char_count} chars) from {file_path} starting at line {start_line}", logger)
+            else:
+                log_success(
+                    f"Successfully read {len(content_slice)} lines from {file_path} (lines {start_line}-{actual_end} of {total_lines})", logger)
         return content
     except Exception as e:
         log_error(e, f"Error reading file {file_path}", logger)

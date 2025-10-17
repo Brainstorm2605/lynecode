@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import argparse
+import json
 import re
 import shutil
 from pathlib import Path
@@ -731,7 +732,38 @@ _formatter = ResponseFormatter()
 
 def format_agent_response(response: str) -> None:
     """Format and display agent responses with robust error handling."""
-    _formatter.format_agent_response(response)
+    display_text = response
+
+    try:
+        parsed = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        action = str(parsed.get("action", "")).strip().lower()
+        if action == "summaries":
+            sections = []
+
+            summary_text = parsed.get("summary")
+            if isinstance(summary_text, str) and summary_text.strip():
+                sections.append(summary_text.strip())
+
+            milestones = parsed.get("achieved_milestone") or parsed.get(
+                "achieved_milestones")
+            if isinstance(milestones, str):
+                milestones = [milestones]
+            if isinstance(milestones, list):
+                milestone_lines = [item for item in milestones if isinstance(
+                    item, str) and item.strip()]
+                if milestone_lines:
+                    sections.append("\nAchieved milestones:")
+                    sections.extend(
+                        [f"- {line.strip()}" for line in milestone_lines])
+
+            if sections:
+                display_text = "\n".join(sections)
+
+    _formatter.format_agent_response(display_text)
 
 
 def handle_model_selection(model_manager: ModelManager, chat_menu: ChatMenu) -> Optional[str]:
