@@ -516,7 +516,7 @@ LYNE_TOOL_SPEC = [
         "module": "tool.semgrep",
         "description": "Run Semgrep static analysis on specified path with optional config and severity filters.",
         "parameters": [
-            {"name": "path", "type": "str", "required": True, "description": "Directory or file to scan. Agent can specify exact folder/file path. Never User on root folder instead target specific subfolders/direct file."},
+            {"name": "path", "type": "str", "required": True, "description": "Directory or file to scan. Agent can specify exact folder/file path. Never Use on root folder instead target specific subfolders/direct file."},
             {"name": "severity", "type": "list", "required": False, "default": None, "description": "Subset of ['INFO','WARNING','ERROR'] to include."},
             {"name": "max_results", "type": "int", "required": False, "default": 200, "description": "Limit number of findings returned."},
             {"name": "timeout_sec", "type": "int", "required": False, "default": 60, "description": "CLI timeout in seconds."}
