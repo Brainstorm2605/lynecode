@@ -7,7 +7,11 @@ import os
 from typing import Dict, Optional, List
 from .prompts import (
     PLANNER_PROMPT,
-    MAIN_PROMPT
+    MAIN_PROMPT,
+    PLAN_JSON_REPAIR_PROMPT,
+    MAIN_ACTION_REPAIR_PROMPT,
+    MAIN_TOOL_CALL_REPAIR_PROMPT,
+    MAIN_SUMMARY_REPAIR_PROMPT
 )
 
 class PromptManager:
@@ -17,7 +21,11 @@ class PromptManager:
         """Initialize the prompt manager with predefined prompts"""
         self.prompts: Dict[str, str] = {
             "planner_prompt": PLANNER_PROMPT,
-            "main_prompt": MAIN_PROMPT
+            "main_prompt": MAIN_PROMPT,
+            "plan_json_repair_prompt": PLAN_JSON_REPAIR_PROMPT,
+            "main_action_repair_prompt": MAIN_ACTION_REPAIR_PROMPT,
+            "main_tool_call_repair_prompt": MAIN_TOOL_CALL_REPAIR_PROMPT,
+            "main_summary_repair_prompt": MAIN_SUMMARY_REPAIR_PROMPT
         }
     
     def get_prompt(self, prompt_name: str) -> Optional[str]:

@@ -27,11 +27,16 @@ def is_likely_text_file(file_path: Path) -> bool:
     return True
 
 
-MAX_FULL_LINES = 1000
+MAX_FULL_LINES = 2000
 MAX_FULL_CHARS = 32000
 
 
-def fetch_content(file_path: str, start_line: int = 1, end_line: int | None = 200) -> str:
+def fetch_content(
+    file_path: str,
+    start_line: int = 1,
+    end_line: int | None = 200,
+    full_file: bool = False,
+) -> str:
     """
     Fetches content from a text-based file, preserving indentation and structure.
 
@@ -39,16 +44,26 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int | None = 20
         file_path: Path to the file to read
         start_line: Starting line number (1-indexed, default: 1)
         end_line: Ending line number (inclusive, default: 200)
+        full_file: When True, fetches the full file (up to 2000 lines / 32000 chars) regardless of end_line
 
     Returns:
         The file content as a string, or None if the file cannot be read
     """
     try:
-        log_function_call("fetch_content", {
-            'file_path': file_path,
-            'start_line': start_line,
-            'end_line': end_line
-        }, logger)
+        log_function_call(
+            "fetch_content",
+            {
+                'file_path': file_path,
+                'start_line': start_line,
+                'end_line': end_line,
+                'full_file': full_file,
+            },
+            logger,
+        )
+
+        if full_file:
+            start_line = 1
+            end_line = None
 
         p = Path(file_path)
 
@@ -72,33 +87,48 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int | None = 20
         file_path_str = str(p)
         file_size = os.path.getsize(file_path_str)
 
-        if file_size < 102400:
+        small_file_threshold = 2 * 1024 * 1024  # 2 MB
+
+        if file_size < small_file_threshold:
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                 all_lines = f.readlines()
         else:
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                 all_lines = []
                 for i, line in enumerate(f, 1):
-                    if i > end_line + 100:
+                    if full_file and i > MAX_FULL_LINES + 50:
+                        break
+                    if not full_file and end_line is not None and i > end_line + 100:
                         break
                     all_lines.append(line)
 
         total_lines = len(all_lines)
-        if file_size >= 102400 and end_line is not None and total_lines <= end_line + 100:
+        if (
+            file_size >= small_file_threshold
+            and not full_file
+            and end_line is not None
+            and total_lines <= end_line + 100
+        ):
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                 all_lines = f.readlines()
             total_lines = len(all_lines)
 
         if total_lines == 0:
-            return f"FILE STATUS: The file '{file_path}' exists but is completely empty (no lines, size is 0 bytes). This is likely a fresh/empty file, no need to call fetch_content again on this path unless content is added later."
+            return (
+                f"FILE STATUS: The file '{file_path}' exists but is completely empty (no lines, size is 0 bytes). "
+                "This is likely a fresh/empty file, no need to call fetch_content again on this path unless content is added later."
+            )
 
-        limit_lines = start_line == 1 and end_line is None
+        limit_lines = full_file or (start_line == 1 and end_line is None)
 
         start_index = start_line - 1
+        actual_start_line = start_index + 1
+        warning_message = ""
 
         if start_index >= total_lines:
             actual_start = max(0, total_lines - 20)
             start_index = actual_start
+            actual_start_line = actual_start + 1
             end_index = total_lines
 
             warning_message = (
@@ -107,63 +137,102 @@ def fetch_content(file_path: str, start_line: int = 1, end_line: int | None = 20
             )
 
             logger.info(f"Line range fallback: {warning_message.strip()}")
-
-        if limit_lines:
-            end_index = min(total_lines, start_index + MAX_FULL_LINES)
         else:
-            end_line_value = end_line if end_line is not None else start_line + 199
-            if end_line_value < start_line:
-                log_error(Exception("Invalid line range"),
-                          "Invalid line range", logger)
-                return None
-            end_index = min(end_line_value, total_lines)
+            if limit_lines:
+                end_index = min(total_lines, start_index + MAX_FULL_LINES)
+            else:
+                end_line_value = end_line if end_line is not None else start_line + 199
+                if end_line_value < start_line:
+                    log_error(Exception("Invalid line range"),
+                              "Invalid line range", logger)
+                    return None
+                end_index = min(end_line_value, total_lines)
 
         content_slice = all_lines[start_index:end_index]
 
         if not content_slice:
-            lines_remaining = total_lines - start_line + 1
+            lines_remaining = total_lines - actual_start_line + 1
             if lines_remaining <= 0:
-                return f"\n{'='*80}\n📖 END OF FILE REACHED - No more content to read\n{'='*80}"
-            else:
-                return f"\n{'='*60}\n📖 NO CONTENT IN REQUESTED RANGE\n• Requested lines: {start_line}-{end_line}\n• Total lines in file: {total_lines}\n• Lines remaining: {lines_remaining}\n• To read more: call with start_line={start_line}\n{'='*60}"
+                return (
+                    f"\n{'='*80}\n📖 END OF FILE REACHED - No more content to read\n{'='*80}"
+                )
+            return (
+                f"\n{'='*60}\n📖 NO CONTENT IN REQUESTED RANGE\n"
+                f"• Requested lines: {start_line}-{end_line}\n"
+                f"• Total lines in file: {total_lines}\n"
+                f"• Lines remaining: {lines_remaining}\n"
+                f"• To read more: call with start_line={start_line}\n{'='*60}"
+            )
 
         import io
 
         content_builder = io.StringIO()
         char_count = 0
+        lines_written = 0
         for line in content_slice:
             if limit_lines and char_count >= MAX_FULL_CHARS:
                 break
             content_builder.write(line)
             char_count += len(line)
+            lines_written += 1
         content = content_builder.getvalue()
         content_builder.close()
 
-        actual_end = min(end_line, total_lines)
-        lines_read = len(content_slice)
+        actual_end = actual_start_line + lines_written - 1
 
-        if limit_lines and (end_index >= total_lines or len(content_slice) < MAX_FULL_LINES and char_count < MAX_FULL_CHARS):
-            progress_info = f"\n{'='*80}\n📖 FILE DISPLAYED (up to {len(content.splitlines())} lines, {char_count} characters)\n{'='*80}"
+        guidance_message = ""
+        if limit_lines and (actual_end < total_lines or lines_written >= MAX_FULL_LINES or char_count >= MAX_FULL_CHARS):
+            guidance_message = (
+                f"\n==== FETCH CONTENT NOTICE ===="
+                f"\nYou requested the **full file** for '{file_path}'. To protect the session, only the first {lines_written} lines (approx {char_count} characters) are returning."
+                f"\nTo continue reading the file, set `full_file` to `False` and request the next range:"
+                f"\n  start_line = {actual_end + 1}"
+                f"\n  end_line   = desired_span"
+                f"\n  Total lines of the file: {total_lines}"
+                f"\n==== END OF NOTICE ===="
+            )
+
+        if limit_lines and (
+            actual_end >= total_lines or
+            lines_written < MAX_FULL_LINES and char_count < MAX_FULL_CHARS
+        ):
+            progress_info = (
+                f"\n{'='*80}\n📖 FILE DISPLAYED (up to {lines_written} lines, {char_count} characters)\n{'='*80}"
+            )
         elif actual_end >= total_lines:
-            progress_info = f"\n{'='*80}\n📖 FILE FULLY READ - All {total_lines} lines displayed\n{'='*80}"
+            progress_info = (
+                f"\n{'='*80}\n📖 FILE FULLY READ - All {total_lines} lines displayed\n{'='*80}"
+            )
         else:
             lines_remaining = total_lines - actual_end
-            progress_info = f"\n{'='*60}\n📖 FILE PARTIALLY READ\n• Lines displayed: {start_line}-{actual_end} ({lines_read} lines)\n• Total lines in file: {total_lines}\n• Lines remaining: {lines_remaining}\n{'='*60}"
+            progress_info = (
+                f"\n{'='*60}\n📖 FILE PARTIALLY READ\n"
+                f"• Lines displayed: {actual_start_line}-{actual_end} ({lines_written} lines)\n"
+                f"• Total lines in file: {total_lines}\n"
+                f"• Lines remaining: {lines_remaining}\n{'='*60}"
+            )
 
         content += progress_info
+        if guidance_message:
+            content += guidance_message
 
-        if start_index != start_line - 1:
-            actual_start_line = actual_start + 1
+        if warning_message:
             log_success(
-                f"Fallback read: {len(content_slice)} lines from {file_path} (lines {actual_start_line}-{actual_end} of {total_lines} - original request was {start_line}-{end_line})", logger)
+                f"Fallback read: {lines_written} lines from {file_path} (lines {actual_start_line}-{actual_end} of {total_lines} - original request was {start_line}-{end_line})",
+                logger,
+            )
             content = warning_message + content
         else:
             if limit_lines:
                 log_success(
-                    f"Successfully read up to {len(content.splitlines())} lines ({char_count} chars) from {file_path} starting at line {start_line}", logger)
+                    f"Successfully read up to {lines_written} lines ({char_count} chars) from {file_path} starting at line {actual_start_line}",
+                    logger,
+                )
             else:
                 log_success(
-                    f"Successfully read {len(content_slice)} lines from {file_path} (lines {start_line}-{actual_end} of {total_lines})", logger)
+                    f"Successfully read {lines_written} lines from {file_path} (lines {actual_start_line}-{actual_end} of {total_lines})",
+                    logger,
+                )
         return content
     except Exception as e:
         log_error(e, f"Error reading file {file_path}", logger)

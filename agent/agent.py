@@ -6,12 +6,11 @@ Integrates with prompt management and LLM systems for intelligent behavior.
 """
 
 import json
-import re
 import asyncio
 import difflib
 from typing import Dict, List, Optional, Any, Union, Coroutine, Tuple
 from pathlib import Path
-from util.logging import get_logger, log_function_call, log_error, log_success, log_warning
+from util.logging import get_logger, log_function_call, log_error, log_success, log_warning, log_info
 from conversation_history import ConversationHistory
 
 logger = get_logger("agent")
@@ -122,1092 +121,278 @@ class Agent:
         }
         log_success(f"Tool '{tool_name}' registered successfully", logger)
 
-    def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse LLM JSON with a focused 4-step pipeline:
-        Always returns a valid dict.
-        CRITICAL: Detect when agent returns format examples instead of actual response.
-        """
-
-        fallback_response = {"action": "summaries", "summary": "Unable to parse LLM response", "tool_calls": [], "achieved_milestone": []}
-
-        if not isinstance(response, str) or not response:
-            fallback_response["summary"] = "Invalid response format - not a string"
-            return fallback_response
-
-        text = response.strip()
-        cleaned_text = self._clean_json_text(text)
-        
-
-        if ("For tool calls:" in text and "For summaries:" in text) or \
-           ("If you need to execute tools" in text and "If you need to provide final summary" in text):
-            log_warning("Agent returned format examples instead of actual response - blocking", logger)
-            fallback_response["summary"] = "Agent returned template examples instead of choosing one format. Response blocked."
-            return fallback_response
-
-        json_text = self._extract_json(cleaned_text)
-        if json_text:
-            try:
-                parsed = json.loads(json_text)
-                if isinstance(parsed, dict) and "action" in parsed:
-                    if parsed["action"] in ["call_tool", "summaries", "plan"]:
-                        return self._validate_and_fix_response_structure(parsed)
-                    parsed["action"] = "summaries"
-                    parsed["summary"] = (
-                        "Invalid action type detected - converted to summaries"
-                    )
-                    return self._validate_and_fix_response_structure(parsed)
-                return self._validate_and_fix_response_structure(parsed)
-            except json.JSONDecodeError:
-                decoder = json.JSONDecoder()
-                idx = 0
-                length = len(json_text)
-                collected = []
-
-                while idx < length:
-                    while idx < length and json_text[idx].isspace():
-                        idx += 1
-                    if idx >= length:
-                        break
-                    if json_text[idx] == ',':
-                        idx += 1
-                        continue
-                    try:
-                        obj, next_idx = decoder.raw_decode(json_text, idx)
-                        collected.append(obj)
-                        idx = next_idx
-                    except json.JSONDecodeError:
-                        collected = []
-                        break
-
-                if collected:
-                    primary = None
-                    extra_calls = []
-                    for obj in collected:
-                        if (
-                            isinstance(obj, dict)
-                            and primary is None
-                            and "action" in obj
-                        ):
-                            primary = obj
-                        else:
-                            extra_calls.append(obj)
-
-                    if primary is None:
-                        primary = {"action": "call_tool", "tool_calls": []}
-
-                    tool_calls = primary.get("tool_calls", [])
-                    if not isinstance(tool_calls, list):
-                        tool_calls = [tool_calls] if tool_calls else []
-
-                    for call in extra_calls:
-                        if isinstance(call, dict):
-                            if "tool_name" in call:
-                                tool_calls.append(call)
-                            elif "function" in call:
-                                tool_calls.append(
-                                    {
-                                        "tool_name": call.get(
-                                            "function", "unknown"
-                                        ),
-                                        "parameters": call.get(
-                                            "parameters",
-                                            call.get("args", {}),
-                                        ),
-                                    }
-                                )
-
-                    primary["tool_calls"] = tool_calls
-                    return self._validate_and_fix_response_structure(primary)
-
-        double_brace_match = re.search(r'\{\{\s*({[\s\S]*?})\s*\}\}', cleaned_text)
-        if double_brace_match:
-            try:
-                parsed = json.loads(double_brace_match.group(1))
-                if isinstance(parsed, dict) and "action" in parsed:
-                    if parsed["action"] in ["call_tool", "summaries", "plan"]:
-                        return self._validate_and_fix_response_structure(parsed)
-                    else:
-                        parsed["action"] = "summaries"
-                        parsed["summary"] = f"Invalid action type detected - converted to summaries"
-                        return self._validate_and_fix_response_structure(parsed)
-            except json.JSONDecodeError:
-                pass
-
-        try:
-            parsed = self._parse_with_fallbacks(cleaned_text)
-            if isinstance(parsed, dict) and "action" in parsed:
-                if parsed["action"] in ["call_tool", "summaries", "plan"]:
-                    return self._validate_and_fix_response_structure(parsed)
-                else:
-                    parsed["action"] = "summaries"
-                    parsed["summary"] = f"Invalid action type detected - converted to summaries"
-                    return self._validate_and_fix_response_structure(parsed)
-        except Exception:
-            # As final resort, use best-effort parser
-            try:
-                best = self._best_effort_parse(text)
-                return self._validate_and_fix_response_structure(best)
-            except Exception:
-                pass
-
-        try:
-            summary_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
-            fallback_response["summary"] = summary_text[:20000]
-        except Exception:
-            fallback_response["summary"] = response[:20000]
-        return fallback_response
-
-    def _extract_json(self, text: str) -> str:
-        """
-        Extract JSON from text using balanced-brace scanning, robust to wrappers and noise.
-
-        Args:
-            text: The text to extract JSON from
-
-        Returns:
-            The extracted JSON, or the original text if no JSON is found
-        """
-        try:
-            s = text if isinstance(text, str) else str(text)
-            depth = 0
-            in_string = False
-            escape = False
-            start_idx = -1
-            for i, ch in enumerate(s):
-                if in_string:
-                    if escape:
-                        escape = False
-                    elif ch == '\\':
-                        escape = True
-                    elif ch == '"':
-                        in_string = False
-                    continue
-                else:
-                    if ch == '"':
-                        in_string = True
-                        continue
-                    if ch == '{':
-                        if depth == 0:
-                            start_idx = i
-                        depth += 1
-                        continue
-                    if ch == '}':
-                        if depth > 0:
-                            depth -= 1
-                            if depth == 0 and start_idx != -1:
-                                candidate = s[start_idx:i+1]
-                                # quick validation
-                                try:
-                                    json.loads(candidate)
-                                    return candidate
-                                except Exception:
-                                    return candidate
-            return text
-        except Exception:
-            return text
-
-    def _sanitize_json_candidate(self, text: str) -> str:
-        """Best-effort sanitize common malformed JSON issues in LLM output.
-
-        - Escapes unescaped backslashes inside string literals (e.g., Windows paths)
-        - Normalizes curly quotes to straight quotes
-        - Removes zero-width and BOM characters
-        """
-        try:
-            s = text if isinstance(text, str) else str(text)
-            # Normalize quotes
-            s = s.replace('\u201c', '"').replace('\u201d', '"').replace('\u2018', "'").replace('\u2019', "'")
-            s = s.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
-            # Remove zero-width and BOM
-            s = s.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
-
-            result_chars = []
-            in_string = False
-            escape = False
-            i = 0
-            allowed_escapes = {'\\', '"', '/', 'b', 'f', 'n', 'r', 't', 'u'}
-            while i < len(s):
-                ch = s[i]
-                if in_string:
-                    if escape:
-                        result_chars.append(ch)
-                        escape = False
-                    else:
-                        if ch == '\\':
-                            nxt = s[i+1] if i + 1 < len(s) else ''
-                            if nxt in allowed_escapes:
-                                result_chars.append('\\')
-                            else:
-                                result_chars.append('\\\\')
-                        elif ch == '"':
-                            in_string = False
-                            result_chars.append(ch)
-                        else:
-                            result_chars.append(ch)
-                else:
-                    if ch == '"':
-                        in_string = True
-                        result_chars.append(ch)
-                    else:
-                        result_chars.append(ch)
-
-                if ch == '\\' and in_string and not escape:
-                    escape = True
-                else:
-                    # reset escape when next char processed
-                    pass
-                i += 1
-
-            return ''.join(result_chars)
-        except Exception:
-            return text
-
-    def _strict_json_parse(self, text: str) -> Optional[Dict[str, Any]]:
-        """
-        Strictly parse JSON - NEVER accept malformed JSON.
-        Returns None if JSON is invalid in any way.
-        """
-        if not text or not isinstance(text, str):
+    def _parse_planner_response(self, response: str) -> Optional[List[str]]:
+        if not response:
             return None
+        obj = self._load_json_object(response)
+        if obj:
+            plan_list = self._normalize_plan_list(obj.get("plan"))
+            if plan_list:
+                return plan_list
+        array = self._load_json_array(response)
+        if array:
+            plan_list = self._normalize_plan_list(array)
+            if plan_list:
+                return plan_list
+        return None
 
-        text = text.strip()
-
-        if text.startswith('{{') and text.endswith('}}'):
-            inner_content = text[2:-2].strip()
-            if inner_content.startswith('{') and inner_content.endswith('}'):
-                text = inner_content
-
-        if not (text.startswith('{') and text.endswith('}')):
+    def _repair_planner_response(self, response: str) -> Optional[List[str]]:
+        repaired = self._call_repair_prompt(
+            prompt_key="plan_json_repair_prompt",
+            malformed_payload=response,
+            max_tokens=1024,
+            context_label=f"planner attempt {self.current_iteration + 1}"
+        )
+        if not repaired:
             return None
+        obj = self._load_json_object(repaired)
+        if not obj:
+            return None
+        return self._normalize_plan_list(obj.get("plan"))
 
-        try:
+    def _parse_main_response(self, response: str) -> Optional[Dict[str, Any]]:
+        if not response:
+            return None
+        original = self._load_json_object(response)
+        normalized = self._normalize_main_response(original)
+        if normalized:
+            return normalized
 
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
+        mode = "action"
+        if isinstance(original, dict):
+            action = original.get("action")
+            if isinstance(action, str):
+                action_lower = action.strip().lower()
+                if action_lower == "call_tool":
+                    mode = "call_tool"
+                elif action_lower == "summaries":
+                    mode = "summaries"
 
-        try:
+        repaired = self._repair_main_response(response, mode)
+        if repaired:
+            return repaired
 
-            import json5
-            parsed = json5.loads(text)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
+        if mode != "action":
+            repaired_action = self._repair_main_response(response, "action")
+            if repaired_action:
+                return repaired_action
 
         return None
 
-    def _clean_json_text(self, text: str) -> str:
-        try:
-            s = text if isinstance(text, str) else str(text)
-            s = s.replace('\ufeff', '')
-            s = s.replace('“', '"').replace('”', '"').replace('’', "'")
-            s = s.replace('\u200b', '').replace(
-                '\u200c', '').replace('\u200d', '')
-            s = s.strip()
-            s = re.sub(r'^\s*```(?:json|JSON)?\s*', '', s)
-            s = re.sub(r'```\s*$', '', s)
-            s = re.sub(r'(?m)^[\s\t]*[│].*$', '', s)
-            s = re.sub(r'(?m)^\s*[╭╮╯╰─│]+\s*$', '', s)
-            s = re.sub(r'(?m)^\s*╭.*╮\s*$', '', s)
-            s = re.sub(r'(?m)^\s*╰.*╯\s*$', '', s)
-            open_obj = s.find('{')
-            open_arr = s.find('[')
-            opens = [i for i in [open_obj, open_arr] if i != -1]
-            if opens:
-                open_idx = min(opens)
-                close_idx_obj = s.rfind('}')
-                close_idx_arr = s.rfind(']')
-                closes = [i for i in [close_idx_obj, close_idx_arr] if i != -1]
-                if closes:
-                    close_idx = max(closes)
-                    if close_idx > open_idx:
-                        core = s[open_idx:close_idx + 1]
-                        s = core
+    def _repair_main_response(self, response: str, mode: str) -> Optional[Dict[str, Any]]:
+        if mode == "call_tool":
+            prompt_name = "main_tool_call_repair_prompt"
+        elif mode == "summaries":
+            prompt_name = "main_summary_repair_prompt"
+        else:
+            prompt_name = "main_action_repair_prompt"
+
+        repaired = self._call_repair_prompt(
+            prompt_key=prompt_name,
+            malformed_payload=response,
+            max_tokens=8192,
+            context_label=f"main action {mode} repair"
+        )
+        if not repaired and prompt_name != "main_action_repair_prompt":
+            repaired = self._call_repair_prompt(
+                prompt_key="main_action_repair_prompt",
+                malformed_payload=response,
+                max_tokens=8192,
+                context_label="main action generic repair"
+            )
+        if not repaired:
+            return None
+        obj = self._load_json_object(repaired)
+        if not obj:
+            return None
+        return self._normalize_main_response(obj)
+
+    def _normalize_main_response(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        action = data.get("action")
+        if not isinstance(action, str):
+            return None
+        action_value = action.strip()
+        if action_value == "call_tool":
+            tool_calls = data.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                return None
+            normalized_calls: List[Dict[str, Any]] = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    return None
+                name = call.get("tool_name") or call.get("function")
+                if not isinstance(name, str) or not name.strip():
+                    return None
+                params = call.get("parameters") or call.get("args") or call.get("params") or {}
+                if not isinstance(params, dict):
+                    return None
+                normalized_calls.append({"tool_name": name.strip(), "parameters": params})
+            summary_value = data.get("summary")
+            if summary_value is None:
+                summary_text = ""
+            elif isinstance(summary_value, str):
+                summary_text = summary_value
             else:
-                s = re.sub(r'(?m)^\s*#{1,6}\s+.*$', '', s)
-                s = re.sub(r'(?m)^\s*>+\s+.*$', '', s)
-                s = re.sub(r'(?m)^\s*([-*_]\s*){3,}\s*$', '', s)
-                s = re.sub(r'(?m)^\s*[\-|*]\s+.*$', '', s)
-            m = re.match(r'^\s*\{\s*\{([\s\S]*)\}\s*\}\s*$', s)
-            if m:
-                s = m.group(1).strip()
-            s = re.sub(r'/\*[\s\S]*?\*/', '', s)
-            s = re.sub(r'(?m)^\s*//.*$', '', s)
-            s = re.sub(r',\s*([}\]])', r'\1', s)
-            s = re.sub(r'\n\s*\n\s*\n+', '\n\n', s)
-            s = s.strip()
-            return s
-        except Exception:
-            return text
-
-    def _best_effort_parse(self, text: str) -> Dict[str, Any]:
-        """
-        Best-effort parsing for malformed JSON responses.
-        Handles unescaped quotes and wrappers; extracts key fields heuristically.
-        """
-        try:
-            raw = text if isinstance(text, str) else str(text)
-            cleaned = self._clean_json_text(raw)
-            core = self._extract_json(cleaned)
-
-            try:
-                parsed = json.loads(core)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-
-            try:
-                import json5  # type: ignore
-                parsed = json5.loads(core)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-
-            result: Dict[str, Any] = {
-                "action": "summaries",
-                "summary": "",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-            import re as _re
-            m = _re.search(r'"action"\s*:\s*"([^"]+?)"', core)
-            if m:
-                act = m.group(1).strip()
-                if act in ["call_tool", "summaries"]:
-                    result["action"] = act
-
-            m = _re.search(r'"achieved_milestone"\s*:\s*(\[[\s\S]*?\])', core)
-            if m:
-                arr_txt = m.group(1)
-                try:
-                    arr = json.loads(arr_txt)
-                    if isinstance(arr, list):
-                        result["achieved_milestone"] = arr
-                except Exception:
-                    try:
-                        import json5  # type: ignore
-                        arr = json5.loads(arr_txt)
-                        if isinstance(arr, list):
-                            result["achieved_milestone"] = arr
-                    except Exception:
-                        vals = _re.findall(r'"([^"]+?)"', arr_txt)
-                        if vals:
-                            result["achieved_milestone"] = vals
-
-            summ_key = core.find('"summary"')
-            if summ_key != -1:
-                colon = core.find(':', summ_key)
-                if colon != -1:
-                    j = colon + 1
-                    while j < len(core) and core[j] in [' ', '\t', '\n', '\r']:
-                        j += 1
-                    if j < len(core) and core[j] == '"':
-                        start = j + 1
-                        end_brace_idx = core.rfind('}')
-                        end_quote_idx = core.rfind('"', start, end_brace_idx)
-                        if end_quote_idx != -1 and end_quote_idx > start:
-                            summary_val = core[start:end_quote_idx]
-                        else:
-                            summary_val = core[start:end_brace_idx]
-                    else:
-                        end_brace_idx = core.rfind('}')
-                        summary_val = core[j:end_brace_idx]
-                    summary_val = summary_val.replace('\\"', '"')
-                    result["summary"] = summary_val.strip()
-
-            return result
-        except Exception:
+                summary_text = str(summary_value)
+            milestones = self._normalize_string_list(data.get("achieved_milestone"))
             return {
-                "action": "summaries",
-                "summary": "Unable to parse LLM response (best-effort)",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-    def _parse_with_fallbacks(self, text: str) -> Optional[Union[Dict[str, Any], List[Any]]]:
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        try:
-            try:
-                import json5  # type: ignore
-                return json5.loads(text)
-            except Exception:
-                pass
-            try:
-                from json_repair import repair_json  # type: ignore
-                repaired = repair_json(text)
-                return json.loads(repaired)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        cleaned = self._clean_json_text(text)
-        try:
-            return json.loads(cleaned)
-        except Exception:
-            try:
-                import json5  # type: ignore
-                return json5.loads(cleaned)
-            except Exception:
-                pass
-            try:
-                from json_repair import repair_json  # type: ignore
-                repaired = repair_json(cleaned)
-                return json.loads(repaired)
-            except Exception:
-                return None
-
-    def _extract_known_dict_structures(self, cleaned_response: str, original_response: str) -> Optional[Dict[str, Any]]:
-        """
-        Extract known dictionary structures using direct field extraction for known JSON formats.
-        This preserves formatting better than regex by leveraging known response structures.
-
-        Args:
-            cleaned_response: Cleaned response string
-            original_response: Original response string
-
-        Returns:
-            Extracted dictionary structure or None if no known structure found
-        """
-        try:
-            response_lower = cleaned_response.lower()
-
-            if '"action":' in response_lower and '"answer":' in response_lower:
-                start_idx = cleaned_response.find('"answer":')
-                if start_idx != -1:
-                    answer_start = cleaned_response.find(
-                        '"', start_idx + len('"answer":'))
-                    if answer_start != -1:
-                        answer_end = answer_start + 1
-                        brace_count = 0
-                        in_string = True
-                        escape_next = False
-
-                        i = answer_end
-                        while i < len(cleaned_response):
-                            char = cleaned_response[i]
-
-                            if escape_next:
-                                escape_next = False
-                                i += 1
-                                continue
-
-                            if char == '\\':
-                                escape_next = True
-                            elif char == '"' and not escape_next:
-                                if brace_count == 0:
-                                    break
-                            elif char == '{':
-                                brace_count += 1
-                            elif char == '}':
-                                brace_count -= 1
-
-                            i += 1
-
-                        if i < len(cleaned_response):
-                            answer_content = cleaned_response[answer_end:i]
-                            if answer_content.startswith('"') and answer_content.endswith('"'):
-                                answer_content = answer_content[1:-1]
-                            answer_content = answer_content.replace(
-                                '\\"', '"').replace('\\\\', '\\')
-
-                            return {
-                                "action": "answer",
-                                "answer": answer_content,
-                                "tool_calls": [],
-                                "achieved_milestone": []
-                            }
-
-            if '"action":' in response_lower and ('"summary":' in response_lower or '"summaries":' in response_lower):
-                start_idx = cleaned_response.find('"summary":')
-                if start_idx == -1:
-                    start_idx = cleaned_response.find('"summaries":')
-                if start_idx != -1:
-                    summary_start = cleaned_response.find('"', start_idx + 11)
-                    if summary_start != -1:
-                        summary_end = summary_start + 1
-                        brace_count = 0
-                        in_string = True
-                        escape_next = False
-
-                        i = summary_end
-                        while i < len(cleaned_response):
-                            char = cleaned_response[i]
-
-                            if escape_next:
-                                escape_next = False
-                                i += 1
-                                continue
-
-                            if char == '\\':
-                                escape_next = True
-                            elif char == '"' and not escape_next:
-                                if brace_count == 0:
-                                    break
-                            elif char == '{':
-                                brace_count += 1
-                            elif char == '}':
-                                brace_count -= 1
-
-                            i += 1
-
-                        if i < len(cleaned_response):
-                            summary_content = cleaned_response[summary_end:i]
-                            if summary_content.startswith('"') and summary_content.endswith('"'):
-                                summary_content = summary_content[1:-1]
-                            summary_content = summary_content.replace(
-                                '\\"', '"').replace('\\\\', '\\')
-
-                            achieved_milestone = []
-
-                            milestone_start = cleaned_response.find(
-                                '"achieved_milestone":')
-                            if milestone_start != -1:
-                                milestone_content = self._extract_json_value(
-                                    cleaned_response, milestone_start + len('"achieved_milestone":'))
-                                if milestone_content:
-                                    try:
-                                        achieved_milestone = json.loads(
-                                            milestone_content)
-                                        if not isinstance(achieved_milestone, list):
-                                            achieved_milestone = [
-                                                achieved_milestone] if achieved_milestone else []
-                                    except:
-                                        achieved_milestone = []
-
-                            return {
-                                "action": "summaries",
-                                "summary": summary_content,
-                                "tool_calls": [],
-                                "achieved_milestone": achieved_milestone
-                            }
-
-            if '"action":' in response_lower and '"plan":' in response_lower:
-                plan_start = cleaned_response.find('"plan":')
-                if plan_start != -1:
-                    plan_content = self._extract_json_value(
-                        cleaned_response, plan_start + len('"plan":'))
-                    if plan_content:
-                        try:
-                            plan_data = json.loads(plan_content)
-                            if isinstance(plan_data, list):
-                                return {
-                                    "action": "plan",
-                                    "plan": plan_data
-                                }
-                            else:
-                                return {
-                                    "action": "plan",
-                                    "plan": [str(plan_data)] if plan_data else []
-                                }
-                        except:
-                            pass
-
-            return None
-
-        except Exception as e:
-            log_warning(
-                f"Error in dictionary structure extraction: {str(e)}", logger)
-            return None
-
-    def _extract_json_value(self, text: str, start_pos: int) -> Optional[str]:
-        """Extract a JSON value from text starting at a given position."""
-        try:
-            text = text[start_pos:].lstrip()
-            if not text:
-                return None
-
-            if text.startswith('"'):
-                end_pos = start_pos + 1
-                escape_next = False
-                while end_pos < len(text) + start_pos:
-                    char = text[end_pos - start_pos]
-                    if escape_next:
-                        escape_next = False
-                    elif char == '\\':
-                        escape_next = True
-                    elif char == '"':
-                        return text[:end_pos - start_pos + 1]
-                    end_pos += 1
-            elif text.startswith('['):
-                brace_count = 1
-                end_pos = start_pos + 1
-                while end_pos < len(text) + start_pos and brace_count > 0:
-                    char = text[end_pos - start_pos]
-                    if char == '[':
-                        brace_count += 1
-                    elif char == ']':
-                        brace_count -= 1
-                    end_pos += 1
-                if brace_count == 0:
-                    return text[:end_pos - start_pos]
-            elif text.startswith('{'):
-                brace_count = 1
-                end_pos = start_pos + 1
-                while end_pos < len(text) + start_pos and brace_count > 0:
-                    char = text[end_pos - start_pos]
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                    end_pos += 1
-                if brace_count == 0:
-                    return text[:end_pos - start_pos]
-
-            return None
-        except Exception:
-            return None
-
-    def _validate_and_fix_response_structure(self, response_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate and fix the response structure to ensure it has all required fields.
-
-        Args:
-            response_dict: Raw parsed dictionary
-
-        Returns:
-            Validated and fixed dictionary with all required fields
-        """
-        try:
-
-            validated = {
-                "action": "summaries",
-                "summary": "",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-            if isinstance(response_dict, dict):
-
-                if "action" in response_dict:
-                    action = response_dict["action"]
-                    if isinstance(action, str) and action.strip():
-                        validated["action"] = action.strip()
-
-                if "summary" in response_dict:
-                    summary = response_dict["summary"]
-                    if isinstance(summary, str):
-                        validated["summary"] = summary
-                    elif summary is not None:
-                        validated["summary"] = str(summary)
-
-                if "tool_calls" in response_dict:
-                    tool_calls = response_dict["tool_calls"]
-                    if isinstance(tool_calls, list):
-                        validated["tool_calls"] = tool_calls
-                    elif tool_calls is not None:
-
-                        if isinstance(tool_calls, dict):
-                            validated["tool_calls"] = [tool_calls]
-                        else:
-                            log_warning(
-                                f"Invalid tool_calls type: {type(tool_calls)}", logger)
-
-                milestone_fields = [
-                    "achieved_milestone", "achieved_milestones", "milestone", "milestones"]
-                for field in milestone_fields:
-                    if field in response_dict:
-                        milestones = response_dict[field]
-                        if isinstance(milestones, list):
-                            validated["achieved_milestone"] = milestones
-                            break
-                        elif isinstance(milestones, str) and milestones.strip():
-                            validated["achieved_milestone"] = [
-                                milestones.strip()]
-                            break
-                        elif milestones is not None:
-                            validated["achieved_milestone"] = [str(milestones)]
-                            break
-
-                if "plan" in response_dict:
-                    plan = response_dict["plan"]
-                    if isinstance(plan, list):
-                        validated["plan"] = plan
-                    elif isinstance(plan, str):
-
-                        validated["plan"] = [plan]
-                    elif plan is not None:
-                        validated["plan"] = [str(plan)]
-
-                if "answer" in response_dict:
-                    answer = response_dict["answer"]
-                    if isinstance(answer, str):
-                        validated["answer"] = answer
-                    elif answer is not None:
-                        validated["answer"] = str(answer)
-
-                for key, value in response_dict.items():
-                    if key not in validated and value is not None:
-                        try:
-
-                            json.dumps(value)
-                            validated[key] = value
-                        except (TypeError, ValueError):
-
-                            log_warning(
-                                f"Skipping non-serializable field: {key}", logger)
-
-            return validated
-
-        except Exception as e:
-            log_error(e, "Error validating response structure", logger)
-            return {
-                "action": "summaries",
-                "summary": f"Error validating response: {str(e)}",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-    def _convert_list_to_dict_response(self, response_list: List[Any], original_response: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Convert a list response to a proper dictionary structure.
-
-        Args:
-            response_list: List that was parsed from JSON
-            original_response: Original response text for fallback
-
-        Returns:
-            Dictionary with proper agent response structure
-        """
-        try:
-
-            result = {
-                "action": "summaries",
-                "summary": "Converted from list response",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-            if not isinstance(response_list, list):
-                result["summary"] = f"Expected list but got {type(response_list)}"
-                return result
-
-            if len(response_list) == 0:
-
-                if original_response and original_response.strip():
-
-                    clean_content = original_response.strip()
-
-                    clean_content = re.sub(r'[╭╮╯╰─│]', '', clean_content)
-                    clean_content = re.sub(
-                        r'\n\s*\n\s*\n+', '\n\n', clean_content)
-
-                    if len(clean_content) > 500:
-
-                        summary_keywords = ['summary',
-                                            'result', 'response', 'answer']
-                        lines = clean_content.split('\n')
-                        summary_lines = []
-
-                        for line in lines:
-                            line_lower = line.lower().strip()
-                            if any(keyword in line_lower for keyword in summary_keywords):
-                                summary_lines.append(line.strip())
-
-                        if summary_lines:
-                            clean_content = ' '.join(summary_lines[:20])
-
-                    log_success(
-                        f"Empty list detected, using cleaned response content (length: {len(clean_content)})", logger)
-                    result["summary"] = clean_content[:30000]
-                else:
-                    result["summary"] = "Empty list response, no content available"
-                return result
-
-            for item in response_list:
-                if isinstance(item, dict):
-
-                    if "tool_name" in item or "function" in item:
-
-                        tool_call = {
-                            "tool_name": item.get("tool_name", item.get("function", "unknown")),
-                            "parameters": item.get("parameters", item.get("params", item.get("args", {})))
-                        }
-                        result["tool_calls"].append(tool_call)
-                        result["action"] = "call_tool"
-
-                    elif "milestone" in item or "achievement" in item:
-                        milestone = item.get(
-                            "milestone", item.get("achievement"))
-                        if isinstance(milestone, str) and milestone.strip():
-                            result["achieved_milestone"].append(
-                                milestone.strip())
-
-                    elif "action" in item:
-                        result["action"] = str(item["action"])
-                        if "summary" in item:
-                            result["summary"] = str(item["summary"])
-                        if "tool_calls" in item and isinstance(item["tool_calls"], list):
-                            result["tool_calls"] = item["tool_calls"]
-
-                    elif isinstance(item, str):
-
-                        if "plan" not in result:
-                            result["plan"] = []
-                            result["action"] = "plan"
-                        result["plan"].append(item)
-
-                elif isinstance(item, str):
-
-                    if len(response_list) > 1:
-
-                        if "plan" not in result:
-                            result["plan"] = []
-                            result["action"] = "plan"
-                        result["plan"].append(item)
-                    else:
-
-                        result["summary"] = item
-
-            if (result["action"] == "summaries" and
-                result["summary"] == "Converted from list response" and
-                not result["tool_calls"] and
-                    not result["achieved_milestone"]):
-                if original_response and original_response.strip():
-                    result["summary"] = original_response.strip()
-                    log_success(
-                        f"Using original response content for unprocessed list (length: {len(original_response)})", logger)
-                else:
-                    result["summary"] = f"Processed list with {len(response_list)} items but no extractable content"
-
-            log_success(
-                f"Successfully converted list to dict response with action: {result['action']}", logger)
-            return result
-
-        except Exception as e:
-            log_error(e, "Error converting list to dict response", logger)
-            return {
-                "action": "summaries",
-                "summary": f"Error converting list response: {str(e)}",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
-
-    def _infer_tool_call_response(self, response: str) -> Dict[str, Any]:
-        """
-        Infer tool calls from natural language response.
-
-        Args:
-            response: Raw response string
-
-        Returns:
-            Dictionary with inferred tool calls
-        """
-        try:
-            result = {
                 "action": "call_tool",
-                "summary": "Inferred tool calls from response",
-                "tool_calls": [],
-                "achieved_milestone": []
+                "summary": summary_text,
+                "tool_calls": normalized_calls,
+                "achieved_milestone": milestones,
             }
+        if action_value == "summaries":
+            summary_value = data.get("summary")
+            if summary_value is None:
+                return None
+            if not isinstance(summary_value, str):
+                summary_value = str(summary_value)
+            milestones = self._normalize_string_list(data.get("achieved_milestone"))
+            return {
+                "action": "summaries",
+                "summary": summary_value,
+                "achieved_milestone": milestones,
+                "tool_calls": [],
+            }
+        return None
 
-            tool_call_patterns = [
-
-                r'(\w+)\s*\(\s*([^)]*)\s*\)',
-
-                r'call\s+(\w+)\s+with\s+(.+?)(?:\n|$)',
-
-                r'use\s+(\w+)\s+(.+?)(?:\n|$)',
-
-                r'(\w+)\s*:\s*(.+?)(?:\n|$)',
-
-                r'execute\s+(\w+)\s+(.+?)(?:\n|$)',
-            ]
-
-            available_tools = set(
-                self.available_tools.keys()) if self.available_tools else set()
-
-            for pattern in tool_call_patterns:
-                try:
-                    tool_matches = re.findall(
-                        pattern, response, re.IGNORECASE | re.MULTILINE)
-                    if tool_matches:
-                        for match in tool_matches:
-                            if isinstance(match, tuple) and len(match) >= 2:
-                                tool_name, params_str = match[0], match[1]
-                            elif isinstance(match, tuple) and len(match) == 1:
-                                tool_name, params_str = match[0], ""
-                            else:
-                                parts = str(match).split(None, 1)
-                                tool_name = parts[0] if parts else str(match)
-                                params_str = parts[1] if len(parts) > 1 else ""
-
-                            if available_tools and tool_name not in available_tools:
+    def _normalize_plan_list(self, value: Any) -> Optional[List[str]]:
+        if not isinstance(value, list):
+            return None
+        result: List[str] = []
+        for item in value:
+            if item is None:
                                 continue
+            text = str(item).strip()
+            if text:
+                result.append(text)
+        return result if result else None
 
-                            try:
-
-                                params = self._parse_tool_parameters(
-                                    params_str)
-
-                                result["tool_calls"].append({
-                                    "tool_name": tool_name,
-                                    "parameters": params
-                                })
-
-                            except Exception as e:
-                                log_warning(
-                                    f"Failed to parse parameters for tool {tool_name}: {str(e)}", logger)
-
-                                result["tool_calls"].append({
-                                    "tool_name": tool_name,
-                                    "parameters": {}
-                                })
-
-                        if result["tool_calls"]:
-                            break
-                except Exception as e:
-                    log_warning(
-                        f"Error processing pattern {pattern}: {str(e)}", logger)
+    def _normalize_string_list(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            result: List[str] = []
+            for item in value:
+                if item is None:
                     continue
-
-            if not result["tool_calls"]:
-                result["action"] = "summaries"
-                result["summary"] = "Unable to extract specific tool calls from response"
-
+                text = str(item).strip()
+                if text:
+                    result.append(text)
             return result
+        text = str(value).strip()
+        return [text] if text else []
 
-        except Exception as e:
-            log_error(e, "Error inferring tool call response", logger)
-            return {
-                "action": "summaries",
-                "summary": f"Error inferring tool calls: {str(e)}",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
+    def _call_repair_prompt(
+        self,
+        prompt_key: str,
+        malformed_payload: str,
+        max_tokens: int,
+        context_label: str,
+    ) -> Optional[str]:
+        if not self.prompt_manager:
+            log_warning(f"Repair prompt '{prompt_key}' skipped; prompt manager missing", logger)
+            return None
+        template = self.prompt_manager.get_prompt(prompt_key)
+        if not template:
+            log_warning(f"Repair prompt '{prompt_key}' not found", logger)
+            return None
+        prompt = (
+            f"{template}\n\n--- Malformed JSON (for repair) ---\n"
+            f"{malformed_payload.strip()}"
+        )
+        log_info(f"Invoking repair prompt '{prompt_key}' ({context_label})", logger)
+        response = self._call_llm(prompt, max_tokens=max_tokens)
+        if response:
+            log_success(f"Repair prompt '{prompt_key}' produced output", logger)
+        else:
+            log_warning(f"Repair prompt '{prompt_key}' returned empty response", logger)
+        return response
 
-    def _parse_tool_parameters(self, params_str: str) -> Dict[str, Any]:
-        """
-        Parse tool parameters from string with multiple fallback strategies.
-
-        Args:
-            params_str: Parameter string to parse
-
-        Returns:
-            Dictionary of parameters (empty dict if parsing fails)
-        """
+    def _load_json_object(self, text: str) -> Optional[Dict[str, Any]]:
+        stripped = self._strip_wrappers(text)
+        if not stripped:
+            return None
         try:
-            if not params_str or not params_str.strip():
-                return {}
-
-            params_str = params_str.strip()
-
-            if ((params_str.startswith('"') and params_str.endswith('"')) or
-                    (params_str.startswith("'") and params_str.endswith("'"))):
-                params_str = params_str[1:-1]
-
-            if params_str.startswith('{') and params_str.endswith('}'):
-                try:
-                    return json.loads(params_str)
-                except json.JSONDecodeError:
-                    pass
-
-            params = {}
-
-            kv_patterns = [
-                r'(\w+)\s*=\s*"([^"]*)"',
-                r"(\w+)\s*=\s*'([^']*)'",
-                r'(\w+)\s*=\s*([^,\s]+)',
-            ]
-
-            for pattern in kv_patterns:
-                matches = re.findall(pattern, params_str)
-                for key, value in matches:
-                    try:
-
-                        parsed_value = json.loads(value)
-                        params[key] = parsed_value
-                    except (json.JSONDecodeError, ValueError):
-
-                        params[key] = value
-
-            if not params and '=' not in params_str:
-
-                values = [v.strip() for v in params_str.split(',')]
-                for i, value in enumerate(values):
-                    try:
-                        parsed_value = json.loads(value)
-                        params[f"param_{i}"] = parsed_value
-                    except (json.JSONDecodeError, ValueError):
-                        params[f"param_{i}"] = value.strip('"\'')
-
-            return params
-
-        except Exception as e:
-            log_warning(
-                f"Error parsing tool parameters '{params_str}': {str(e)}", logger)
-            return {}
-
-    def _infer_plan_response(self, response: str) -> Dict[str, Any]:
-        """
-        Infer a plan response from natural language.
-
-        Args:
-            response: Raw response string
-
-        Returns:
-            Dictionary with plan structure
-        """
+            obj = json.loads(stripped)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        block = self._find_json_block(stripped, "{", "}")
+        if not block:
+            return None
         try:
-            result = {
-                "action": "plan",
-                "plan": [],
-                "summary": "Inferred plan from response"
-            }
+            obj = json.loads(block)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+        return None
 
-            plan_patterns = [
-                r'^\s*\d+\.\s*(.+)$',
-                r'^\s*-\s*(.+)$',
-                r'^\s*\*\s*(.+)$',
-                r'^\s*•\s*(.+)$',
-            ]
+    def _load_json_array(self, text: str) -> Optional[List[Any]]:
+        stripped = self._strip_wrappers(text)
+        if not stripped:
+            return None
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, list):
+                return obj
+        except Exception:
+            pass
+        block = self._find_json_block(stripped, "[", "]")
+        if not block:
+            return None
+        try:
+            obj = json.loads(block)
+            if isinstance(obj, list):
+                return obj
+        except Exception:
+            return None
+        return None
 
-            lines = response.split('\n')
-            plan_steps = []
+    def _strip_wrappers(self, text: str) -> str:
+        if not isinstance(text, str):
+            return ""
+        s = text.strip()
+        if s.startswith("```"):
+            s = s[3:]
+            newline = s.find("\n")
+            if newline != -1:
+                s = s[newline + 1 :]
+            end = s.rfind("```")
+            if end != -1:
+                s = s[:end]
+        return s.strip()
 
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-
-                for pattern in plan_patterns:
-                    match = re.match(pattern, line)
-                    if match:
-                        step = match.group(1).strip()
-                        if step:
-                            plan_steps.append(step)
-                        break
-
-            if plan_steps:
-                result["plan"] = plan_steps
+    def _find_json_block(self, text: str, open_char: str, close_char: str) -> Optional[str]:
+        depth = 0
+        start = -1
+        in_string = False
+        escape = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
             else:
-
-                sentences = [s.strip()
-                             for s in response.split('.') if s.strip()]
-                if len(sentences) > 1:
-                    result["plan"] = sentences[:10]
-                else:
-                    result["plan"] = [response]
-
-            return result
-
-        except Exception as e:
-            log_error(e, "Error inferring plan response", logger)
-            return {
-                "action": "summaries",
-                "summary": f"Error inferring plan: {str(e)}",
-                "tool_calls": [],
-                "achieved_milestone": []
-            }
+                if char == '"':
+                    in_string = True
+                elif char == open_char:
+                    if depth == 0:
+                        start = index
+                    depth += 1
+                elif char == close_char:
+                    if depth > 0:
+                        depth -= 1
+                        if depth == 0 and start != -1:
+                            return text[start : index + 1]
+        return None
 
     def _call_llm(self, prompt: str, max_tokens: int = 1024, system_prompt: Optional[str] = None) -> Optional[str]:
         """
@@ -1357,39 +542,12 @@ class Agent:
                     attempt += 1
                     continue
 
-                result_data = self._extract_json_from_response(response)
-                if not result_data or not isinstance(result_data, dict):
-                    log_error(Exception("Invalid planning result format"),
-                              "Planning result is not a valid JSON object", logger)
-                    attempt += 1
-                    continue
-
-                action_type = str(result_data.get("action", "")).strip().lower()
-                if action_type != "plan":
-                    log_warning(
-                        f"Planner returned action '{action_type}' instead of 'plan' (attempt {attempt + 1}/{max_attempts})",
-                        logger
-                    )
-                    attempt += 1
-                    continue
-
-                plan = result_data.get("plan")
-                if not plan or not isinstance(plan, list):
-                    log_error(Exception("Invalid plan format"),
-                              "Plan field is missing, empty, or not a list", logger)
-                    attempt += 1
-                    continue
-
-                normalized_plan = []
-                for milestone in plan:
-                    if isinstance(milestone, str) and milestone.strip():
-                        normalized_plan.append(milestone.strip())
-                    elif milestone is not None:
-                        normalized_plan.append(str(milestone).strip())
-
+                normalized_plan = self._parse_planner_response(response)
                 if not normalized_plan:
-                    log_error(Exception("Empty plan"),
-                              "Planner returned an empty plan after normalization", logger)
+                    normalized_plan = self._repair_planner_response(response)
+                if not normalized_plan:
+                    log_error(Exception("Invalid planning result format"),
+                              "Planner result parsing failed", logger)
                     attempt += 1
                     continue
 
@@ -1787,10 +945,16 @@ class Agent:
 
                 timeout_msg = f"Tool '{tool_name}' timed out after {timeout_seconds}s"
                 log_error(Exception(timeout_msg), f"Universal tool timeout for {tool_name}", logger)
+                guidance = (
+                    "==== UNIVERSAL TIMEOUT NOTICE ====\n"
+                    f"Tool '{tool_name}' ran beyond {timeout_seconds} seconds while using parameters: {parameters}.\n"
+                    "Reconsider these parameters (scoping, severity, path, etc.) and review the prompt guidance so the next attempt finishes sooner."
+                    "==== END OF NOTICE ===="
+                )
                 return {
                     "tool_name": tool_name,
                     "success": False,
-                    "error": f"Tool execution timed out after {timeout_seconds} seconds",
+                    "error": guidance,
                     "parameters": parameters,
                     "timeout_used": timeout_seconds,
                     "timeout_occurred": True,
@@ -2463,15 +1627,51 @@ class Agent:
             AVAILABLE TOOLS:
             {available_tools_formatted}
             
+            Output your response in the specified JSON format: 
+            **CRITICAL: THESE ARE FORMAT TEMPLATES, NOT RESPONSES TO COPY**
+            **CHOOSE ONE FORMAT ONLY, DO NOT RETURN BOTH EXAMPLES:**
+            
+            **TEMPLATE 1, If you need to execute tools, Respond ONLY with a valid JSON object in the following format, use exact formatting and avoid adding anything outside the JSON**
+            {{
+              "action": "call_tool",
+              "tool_calls": [
+                {{
+                  "tool_name": "actual_tool_name_1",
+                  "parameters": {{
+                    "actual_param": "actual_value_1"
+                  }}
+                }},
+                {{
+                  "tool_name": "actual_tool_name_2",
+                  "parameters": {{
+                    "actual_param": "actual_value_2"
+                  }}
+                }}
+                // Add more tool calls as you have decided( maximum up to 10)
+              ],
+              "achieved_milestone": []
+            }}
+
+            **TEMPLATE 2, If you need to provide final summary, Respond ONLY with a valid JSON object in the following format, use exact formatting and avoid adding anything outside the JSON:**
+            {{
+              "action": "summaries",
+              "achieved_milestone": [],
+              "summary": "Your actual summary content here"
+            }}
+            
             ## FORBIDDEN:
             - NEVER mention internal tool names, parameters, or implementation details in user facing text. Don't reference any tools. Focus on findings and recommendations without revealing how you obtained the information.
             - NEVER make <codepart> </codepart> as a part of actual code, it should be used to only wrap code snippets, also don't make spelling mistakes in tag
+            - You are forbidden from using any other action types than "call_tool" and "summaries". If you want to perform a tool call, you MUST use "call_tool" action. If you want to provide final summary, you MUST use "summaries" action. No other action types are allowed.
+            - You are forbidden to give anything extra than action, tool_name and parameters in tool_calls. Don't give extra fields, text or explanations outside/inside of the specified JSON format.
+            - You are forbidden to call same tool with same parameters again and again. If you want to call same tool again, you MUST improvise parameters or gather new information first otheriwise it will create infinite loop.
+            - You are forbidden to act **out of scope** meaning understand the user intent clearly and then act, for example: **if user ask for analysis do analysis don't go beyond that and start modifying files**, this was just example, billions different scenarios can happen, so always stay in scope of user intent and don't go beyond that.
             """
             response = self._call_llm(execution_prompt, max_tokens=8192)
             if not response:
                 return None
 
-            action_data = self._extract_json_from_response(response)
+            action_data = self._parse_main_response(response)
             if not action_data:
                 log_error(Exception("Invalid action result format"),
                           f"Action result parsing failed. Raw response: {response[:200]}...", logger)
@@ -2731,13 +1931,13 @@ class Agent:
             if not response:
                 return None
 
-            parsed = self._extract_json_from_response(response)
-            if not parsed or not isinstance(parsed, dict):
+            parsed = self._parse_main_response(response)
+            if not parsed:
                 return None
 
             parsed_action = str(parsed.get("action", "")).strip().lower()
             if parsed_action != "summaries":
-                parsed["action"] = "summaries"
+                return None
 
             summary_text = parsed.get("summary")
             if isinstance(summary_text, str) and summary_text.strip():

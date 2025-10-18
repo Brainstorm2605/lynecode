@@ -174,14 +174,18 @@ LYNE_TOOL_SPEC = [
             {"name": "start_line", "type": "int", "required": False, "default": 1,
                 "description": "Starting line number (1-indexed, default: 1)."},
             {"name": "end_line", "type": "int", "required": False, "default": 200,
-                "description": "Ending line number (inclusive). Leave empty to stream from start."}
+                "description": "Ending line number (inclusive). Ignored when full_file is true."},
+            {"name": "full_file", "type": "bool", "required": False, "default": False,
+                "description": "When true, returns up to ~2000 lines / 32k characters from the start regardless of end_line"}
         ],
         "use_cases": [
             "When you need to read the content of a single file.",
             "When you want to read only a specific section of a file.",
             "When you need to examine the full file.",
             "When you need to extract content from a file for processing or analysis.",
-            "When you want to read file content without loading the entire file or binary data."
+            "When you want to read file content without loading the entire file or binary data.",
+            "Use full_file=True to read larger files in one go, up to ~2000 lines or 32k characters",
+            "Use full_file=False for targeted reads of specific."
         ]
     },
     {
@@ -512,7 +516,7 @@ LYNE_TOOL_SPEC = [
         "module": "tool.semgrep",
         "description": "Run Semgrep static analysis on specified path with optional config and severity filters.",
         "parameters": [
-            {"name": "path", "type": "str", "required": True, "description": "Directory or file to scan. Agent can specify exact folder/file path."},
+            {"name": "path", "type": "str", "required": True, "description": "Directory or file to scan. Agent can specify exact folder/file path. Never User on root folder instead target specific subfolders/direct file."},
             {"name": "severity", "type": "list", "required": False, "default": None, "description": "Subset of ['INFO','WARNING','ERROR'] to include."},
             {"name": "max_results", "type": "int", "required": False, "default": 200, "description": "Limit number of findings returned."},
             {"name": "timeout_sec", "type": "int", "required": False, "default": 60, "description": "CLI timeout in seconds."}
