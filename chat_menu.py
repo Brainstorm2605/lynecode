@@ -262,6 +262,10 @@ class ChatMenu:
             conversations = self.conversation_history.get_recent_conversations(
                 limit=10, project_path=self.project_path)
             current_model = None
+            if model_manager:
+                stored_model = model_manager.get_preferred_model()
+                if stored_model:
+                    current_model = stored_model
 
             while True:
                 self.display_main_menu()
@@ -281,6 +285,8 @@ class ChatMenu:
                                 result)
                             if validation.get("available", False):
                                 current_model = result
+                                if model_manager:
+                                    model_manager.set_preferred_model(current_model)
 
                                 display_name = current_model
                                 if "-thinking" in current_model:
@@ -438,6 +444,8 @@ class ChatMenu:
                     validation = model_validations[selected_model]
 
                     if validation.get("available", False):
+                        if model_manager:
+                            model_manager.set_preferred_model(selected_model)
                         return selected_model
                     else:
                         error_msg = validation.get(
@@ -520,6 +528,8 @@ class ChatMenu:
                         validation = model_validations[selected_model]
 
                         if validation.get("available", False):
+                            if model_manager:
+                                model_manager.set_preferred_model(selected_model)
                             return selected_model
                         else:
                             error_msg = validation.get(

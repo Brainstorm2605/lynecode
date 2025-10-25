@@ -962,6 +962,7 @@ def main():
                             else:
                                 print(get_colored_text(
                                     f"🔄 Switched to model: {display_name}", "green"))
+                            model_manager.set_preferred_model(new_model)
                         else:
                             if RICH_AVAILABLE:
                                 console.print(Panel(
@@ -1004,6 +1005,7 @@ def main():
                                 else:
                                     print(get_colored_text(
                                         f"🔄 Switched to model: {display_name}", "green"))
+                                model_manager.set_preferred_model(model_name)
                             else:
                                 if RICH_AVAILABLE:
                                     console.print(
@@ -1161,6 +1163,7 @@ def main():
                                 else:
                                     print(get_colored_text(
                                         f"🔄 Switched to model: {display_name}", "green"))
+                                model_manager.set_preferred_model(new_model)
                             else:
                                 if RICH_AVAILABLE:
                                     console.print(

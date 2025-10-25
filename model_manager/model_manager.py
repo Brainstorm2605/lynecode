@@ -42,6 +42,9 @@ class ModelManager:
                 "openrouter": None
             }
 
+            self.config_manager = None
+            self.preferred_model = None
+
             self.model_list = self._load_model_list()
             self.default_models = {
                 "openai": "gpt-4.1",
@@ -51,6 +54,7 @@ class ModelManager:
             }
 
             self._initialize_providers()
+            self.preferred_model = self._load_preferred_model()
 
             log_success("Model manager initialized successfully", logger)
 
@@ -83,9 +87,11 @@ class ModelManager:
     def _initialize_providers(self):
         """Initialize available providers based on secure API keys only."""
         try:
-
-            from api_config_menu import SecureConfigManager
-            config_manager = SecureConfigManager()
+            config_manager = self._get_config_manager()
+            if not config_manager:
+                log_warning(
+                    "Secure config not available - no providers initialized", logger)
+                return
 
             if config_manager.get_key("openai-api-key"):
                 self.providers["openai"] = True
@@ -107,11 +113,61 @@ class ModelManager:
 
             log_success("Secure provider initialization completed", logger)
 
-        except ImportError:
-            log_warning(
-                "Secure config not available - no providers initialized", logger)
         except Exception as e:
             log_error(e, "Failed to initialize secure providers", logger)
+
+    def _get_config_manager(self):
+        if self.config_manager is not None:
+            return self.config_manager
+        try:
+            from api_config_menu import SecureConfigManager
+            self.config_manager = SecureConfigManager()
+        except ImportError:
+            log_warning("Secure config not available", logger)
+            self.config_manager = None
+        except Exception as e:
+            log_error(e, "Failed to initialize secure config manager", logger)
+            self.config_manager = None
+        return self.config_manager
+
+    def _clear_preferred_model_storage(self):
+        config_manager = self._get_config_manager()
+        if config_manager:
+            try:
+                config_manager.delete_key("preferred-model")
+            except Exception as e:
+                log_error(e, "Failed to clear preferred model", logger)
+
+    def _load_preferred_model(self) -> Optional[str]:
+        try:
+            config_manager = self._get_config_manager()
+            if not config_manager:
+                return None
+            stored_model = config_manager.get_key("preferred-model")
+            if not stored_model:
+                return None
+            validation = self.validate_model_availability(stored_model)
+            if validation.get("available", False):
+                return stored_model
+            self._clear_preferred_model_storage()
+            return None
+        except Exception as e:
+            log_error(e, "Failed to load preferred model", logger)
+            return None
+
+    def get_preferred_model(self) -> Optional[str]:
+        return self.preferred_model
+
+    def set_preferred_model(self, model_name: str) -> None:
+        if not model_name:
+            return
+        try:
+            config_manager = self._get_config_manager()
+            if config_manager:
+                config_manager.set_key("preferred-model", model_name)
+            self.preferred_model = model_name
+        except Exception as e:
+            log_error(e, f"Failed to persist preferred model: {model_name}", logger)
 
     def get_available_models(self) -> List[str]:
         """
@@ -213,8 +269,11 @@ class ModelManager:
                     Exception(f"Provider {provider_name} not available"), "", logger)
                 return None
 
-            from api_config_menu import SecureConfigManager
-            config_manager = SecureConfigManager()
+            config_manager = self._get_config_manager()
+            if not config_manager:
+                log_error(
+                    Exception("Secure config not available"), "", logger)
+                return None
 
             if provider_name == "openai":
                 api_key = config_manager.get_key("openai-api-key")
@@ -262,6 +321,13 @@ class ModelManager:
         Returns:
             Default model name or None if no providers available
         """
+        if self.preferred_model:
+            validation = self.validate_model_availability(self.preferred_model)
+            if validation.get("available", False):
+                return self.preferred_model
+            self._clear_preferred_model_storage()
+            self.preferred_model = None
+
         available_providers = self.get_available_providers()
 
         if "openai" in available_providers:
@@ -339,8 +405,10 @@ class ModelManager:
 
             result["provider"] = provider_name
 
-            from api_config_menu import SecureConfigManager
-            config_manager = SecureConfigManager()
+            config_manager = self._get_config_manager()
+            if not config_manager:
+                result["error"] = "Secure configuration not available."
+                return result
 
             if provider_name == "azure":
                 api_key = config_manager.get_key("azure-api-key")
