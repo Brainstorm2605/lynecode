@@ -57,6 +57,7 @@ class Agent:
 
             self.achieved_milestones = []
             self.remaining_plan = []
+            self.milestone_map = {}
             self.shown_progress_messages = set()
 
             self.conversation_history = ConversationHistory()
@@ -225,10 +226,12 @@ class Agent:
                 name = call.get("tool_name") or call.get("function")
                 if not isinstance(name, str) or not name.strip():
                     return None
-                params = call.get("parameters") or call.get("args") or call.get("params") or {}
+                params = call.get("parameters") or call.get(
+                    "args") or call.get("params") or {}
                 if not isinstance(params, dict):
                     return None
-                normalized_calls.append({"tool_name": name.strip(), "parameters": params})
+                normalized_calls.append(
+                    {"tool_name": name.strip(), "parameters": params})
             summary_value = data.get("summary")
             if summary_value is None:
                 summary_text = ""
@@ -236,7 +239,8 @@ class Agent:
                 summary_text = summary_value
             else:
                 summary_text = str(summary_value)
-            milestones = self._normalize_string_list(data.get("achieved_milestone"))
+            milestones = self._normalize_milestone_list(
+                data.get("achieved_milestone"))
             return {
                 "action": "call_tool",
                 "summary": summary_text,
@@ -249,7 +253,8 @@ class Agent:
                 return None
             if not isinstance(summary_value, str):
                 summary_value = str(summary_value)
-            milestones = self._normalize_string_list(data.get("achieved_milestone"))
+            milestones = self._normalize_milestone_list(
+                data.get("achieved_milestone"))
             return {
                 "action": "summaries",
                 "summary": summary_value,
@@ -264,7 +269,7 @@ class Agent:
         result: List[str] = []
         for item in value:
             if item is None:
-                                continue
+                continue
             text = str(item).strip()
             if text:
                 result.append(text)
@@ -285,6 +290,37 @@ class Agent:
         text = str(value).strip()
         return [text] if text else []
 
+    def _normalize_milestone_list(self, value: Any) -> List[Union[int, str]]:
+        """Normalize milestone identifiers (can be integers or strings)."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            result: List[Union[int, str]] = []
+            for item in value:
+                if item is None:
+                    continue
+                if isinstance(item, int):
+                    result.append(item)
+                elif isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        try:
+                            result.append(int(text))
+                        except ValueError:
+                            result.append(text)
+                else:
+                    result.append(item)
+            return result
+        if isinstance(value, int):
+            return [value]
+        text = str(value).strip()
+        if text:
+            try:
+                return [int(text)]
+            except ValueError:
+                return [text]
+        return []
+
     def _call_repair_prompt(
         self,
         prompt_key: str,
@@ -293,7 +329,8 @@ class Agent:
         context_label: str,
     ) -> Optional[str]:
         if not self.prompt_manager:
-            log_warning(f"Repair prompt '{prompt_key}' skipped; prompt manager missing", logger)
+            log_warning(
+                f"Repair prompt '{prompt_key}' skipped; prompt manager missing", logger)
             return None
         template = self.prompt_manager.get_prompt(prompt_key)
         if not template:
@@ -303,12 +340,15 @@ class Agent:
             f"{template}\n\n--- Malformed JSON (for repair) ---\n"
             f"{malformed_payload.strip()}"
         )
-        log_info(f"Invoking repair prompt '{prompt_key}' ({context_label})", logger)
+        log_info(
+            f"Invoking repair prompt '{prompt_key}' ({context_label})", logger)
         response = self._call_llm(prompt, max_tokens=max_tokens)
         if response:
-            log_success(f"Repair prompt '{prompt_key}' produced output", logger)
+            log_success(
+                f"Repair prompt '{prompt_key}' produced output", logger)
         else:
-            log_warning(f"Repair prompt '{prompt_key}' returned empty response", logger)
+            log_warning(
+                f"Repair prompt '{prompt_key}' returned empty response", logger)
         return response
 
     def _load_json_object(self, text: str) -> Optional[Dict[str, Any]]:
@@ -361,7 +401,7 @@ class Agent:
             s = s[3:]
             newline = s.find("\n")
             if newline != -1:
-                s = s[newline + 1 :]
+                s = s[newline + 1:]
             end = s.rfind("```")
             if end != -1:
                 s = s[:end]
@@ -391,7 +431,7 @@ class Agent:
                     if depth > 0:
                         depth -= 1
                         if depth == 0 and start != -1:
-                            return text[start : index + 1]
+                            return text[start: index + 1]
         return None
 
     def _call_llm(self, prompt: str, max_tokens: int = 1024, system_prompt: Optional[str] = None) -> Optional[str]:
@@ -553,6 +593,8 @@ class Agent:
 
                 self.planner_result = normalized_plan
                 self.remaining_plan = normalized_plan.copy()
+                self.milestone_map = {i+1: milestone for i,
+                                      milestone in enumerate(normalized_plan)}
                 self.session_history.append({
                     "type": "planning",
                     "iteration": self.current_iteration,
@@ -564,6 +606,8 @@ class Agent:
                     f"Query planning completed with {len(normalized_plan)} milestones", logger)
                 log_success(
                     f"Initialized remaining milestones: {self.remaining_plan}", logger)
+                log_info(
+                    f"Milestone map created: {self.milestone_map}", logger)
                 return True
 
             log_error(Exception("Planner failed to produce a plan"),
@@ -615,7 +659,6 @@ class Agent:
                 else:
                     parallel_calls.append(tool_call)
 
-
             try:
                 if len(sequential_calls) > 1:
                     return asyncio.run(self._execute_tools_mixed(sequential_calls, parallel_calls))
@@ -624,15 +667,16 @@ class Agent:
             except KeyboardInterrupt:
                 log_warning("Tool execution interrupted by user", logger)
 
-                return [{"tool_name": tc.get("tool_name", "unknown"), "success": False, 
-                        "error": "Tool execution interrupted", "parameters": tc.get("parameters", {})} 
-                       for tc in tool_calls]
+                return [{"tool_name": tc.get("tool_name", "unknown"), "success": False,
+                        "error": "Tool execution interrupted", "parameters": tc.get("parameters", {})}
+                        for tc in tool_calls]
             except Exception as async_error:
-                log_error(async_error, "Asyncio execution failed - universal recovery activated", logger)
+                log_error(
+                    async_error, "Asyncio execution failed - universal recovery activated", logger)
 
-                return [{"tool_name": tc.get("tool_name", "unknown"), "success": False, 
-                        "error": f"Tool execution failed: {str(async_error)}", "parameters": tc.get("parameters", {})} 
-                       for tc in tool_calls]
+                return [{"tool_name": tc.get("tool_name", "unknown"), "success": False,
+                        "error": f"Tool execution failed: {str(async_error)}", "parameters": tc.get("parameters", {})}
+                        for tc in tool_calls]
 
         except Exception as e:
             log_error(e, "Error executing tools", logger)
@@ -944,7 +988,8 @@ class Agent:
             except asyncio.TimeoutError:
 
                 timeout_msg = f"Tool '{tool_name}' timed out after {timeout_seconds}s"
-                log_error(Exception(timeout_msg), f"Universal tool timeout for {tool_name}", logger)
+                log_error(Exception(timeout_msg),
+                          f"Universal tool timeout for {tool_name}", logger)
                 guidance = (
                     "==== UNIVERSAL TIMEOUT NOTICE ====\n"
                     f"Tool '{tool_name}' ran beyond {timeout_seconds} seconds while using parameters: {parameters}.\n"
@@ -960,10 +1005,11 @@ class Agent:
                     "timeout_occurred": True,
                     "timeout_type": "universal_timeout"
                 }
-            
+
             except Exception as tool_execution_error:
 
-                log_error(tool_execution_error, f"Universal tool execution error for '{tool_name}'", logger)
+                log_error(tool_execution_error,
+                          f"Universal tool execution error for '{tool_name}'", logger)
                 return {
                     "tool_name": tool_name,
                     "success": False,
@@ -982,19 +1028,48 @@ class Agent:
                 "parameters": parameters
             }
 
-    def mark_milestone_achieved(self, milestone_text: str):
-        """Mark a milestone as achieved and remove from remaining plan using fuzzy matching."""
+    def _get_milestone_id(self, milestone_text: str) -> Optional[int]:
+        """Get milestone ID from text."""
+        for mid, mtext in self.milestone_map.items():
+            if mtext == milestone_text:
+                return mid
+        return None
+
+    def _get_milestone_by_id(self, milestone_id: int) -> Optional[str]:
+        """Get milestone text from ID."""
+        return self.milestone_map.get(milestone_id)
+
+    def mark_milestone_achieved(self, milestone_identifier):
+        """Mark a milestone as achieved using ID (int) or text (str) with fuzzy fallback."""
+        milestone_text = None
+
+        if isinstance(milestone_identifier, int):
+            milestone_text = self._get_milestone_by_id(milestone_identifier)
+            if not milestone_text:
+                log_warning(
+                    f"Milestone ID {milestone_identifier} not found in milestone map", logger)
+                return
+            log_info(
+                f"Milestone ID {milestone_identifier} resolved to: {milestone_text}", logger)
+        elif isinstance(milestone_identifier, str):
+            milestone_text = milestone_identifier
+        else:
+            log_warning(
+                f"Invalid milestone identifier type: {type(milestone_identifier)}", logger)
+            return
+
         if milestone_text in self.remaining_plan:
             self.remaining_plan.remove(milestone_text)
             if milestone_text not in self.achieved_milestones:
                 self.achieved_milestones.append(milestone_text)
+            milestone_id = self._get_milestone_id(milestone_text)
             log_success(
-                f"Milestone achieved (exact match): {milestone_text}", logger)
+                f"Milestone achieved (exact match): [#{milestone_id}] {milestone_text}", logger)
             return
 
         if milestone_text in self.achieved_milestones:
-            log_warning(
-                f"Milestone '{milestone_text}' already achieved - ignoring duplicate", logger)
+            log_info(
+                f"Milestone '{milestone_text}' already achieved, ignoring duplicate", logger)
             return
 
         if self.remaining_plan:
@@ -1012,8 +1087,9 @@ class Agent:
                 if best_match not in self.achieved_milestones:
                     self.achieved_milestones.append(best_match)
 
+                milestone_id = self._get_milestone_id(best_match)
                 log_success(
-                    f"Milestone achieved (fuzzy match {best_score:.2f}): '{milestone_text}' -> '{best_match}'",
+                    f"Milestone achieved (fuzzy match {best_score:.2f}): [#{milestone_id}] '{milestone_text}' -> '{best_match}'",
                     logger
                 )
                 if len(matches) > 1:
@@ -1251,8 +1327,8 @@ class Agent:
 
     def _get_tool_timeout(self, tool_name: str) -> float:
         """
-        Get universal timeout for any tool - 180 seconds for ALL tools equally.
-        
+        Get universal timeout for any tool, 180 seconds for ALL tools equally.
+
         CRITICAL: No special treatment for any tool. Universal timeout policy.
 
         Args:
@@ -1534,18 +1610,26 @@ class Agent:
                 milestone_context = "\nACHIEVED MILESTONES:\n"
                 if self.achieved_milestones:
                     for milestone in self.achieved_milestones:
-                        milestone_context += f"✓ {milestone}\n"
+                        milestone_id = self._get_milestone_id(milestone)
+                        if milestone_id:
+                            milestone_context += f"✓ [#{milestone_id}] {milestone}\n"
+                        else:
+                            milestone_context += f"✓ {milestone}\n"
                 else:
                     milestone_context += "(No milestones achieved yet)\n"
 
-                milestone_context += "\nREMAINING MILESTONES:\n"
+                milestone_context += "\nREMAINING MILESTONES (Use these IDs in achieved_milestone):\n"
                 if self.remaining_plan:
-                    for i, milestone in enumerate(self.remaining_plan, 1):
-                        milestone_context += f"{i}. {milestone}\n"
+                    for milestone in self.remaining_plan:
+                        milestone_id = self._get_milestone_id(milestone)
+                        if milestone_id:
+                            milestone_context += f"  #{milestone_id}: {milestone}\n"
+                        else:
+                            milestone_context += f"  {milestone}\n"
                 else:
                     milestone_context += "(All milestones completed)\n"
 
-                milestone_context += "\nIMPORTANT: Achieved milestones are removed from remaining list. Only report truly completed milestones.\n"
+                milestone_context += "\nIMPORTANT: Report achieved milestones using their IDs (e.g., [1, 3] for milestones #1 and #3). Only report truly completed milestones.\n"
 
             iteration_guidance = f"""
             ITERATION CONTEXT:
@@ -1649,15 +1733,21 @@ class Agent:
                 }}
                 // Add more tool calls as you have decided( maximum up to 10)
               ],
-              "achieved_milestone": []
+              "achieved_milestone": [1, 3]
             }}
 
             **TEMPLATE 2, If you need to provide final summary, Respond ONLY with a valid JSON object in the following format, use exact formatting and avoid adding anything outside the JSON:**
             {{
               "action": "summaries",
-              "achieved_milestone": [],
+              "achieved_milestone": [1, 3],
               "summary": "Your actual summary content here"
             }}
+            
+            **IMPORTANT NOTES:**
+            - "achieved_milestone" MUST be an array of INTEGERS (milestone IDs from the REMAINING MILESTONES list above)
+            - Example: [1, 3] means you completed milestones #1 and #3
+            - Do NOT use milestone text descriptions,  ONLY use the numeric IDs
+            - If no milestones were achieved, use an empty array: [] but never lie, fabricate achievements or repeat previously achieved ones
             
             ## FORBIDDEN:
             - NEVER mention internal tool names, parameters, or implementation details in user facing text. Don't reference any tools. Focus on findings and recommendations without revealing how you obtained the information.
@@ -1762,12 +1852,9 @@ class Agent:
                 if achieved_milestones:
                     log_success(
                         f"Processing {len(achieved_milestones)} achieved milestones: {achieved_milestones}", logger)
-                for milestone in achieved_milestones:
-                    if milestone and milestone in self.remaining_plan:
-                        self.mark_milestone_achieved(milestone)
-                    elif milestone:
-                        log_warning(
-                            f"Milestone '{milestone}' not found in remaining plan", logger)
+                    for milestone in achieved_milestones:
+                        if milestone is not None and milestone != "":
+                            self.mark_milestone_achieved(milestone)
 
                 if action_type == "summaries":
                     log_success(
@@ -1794,22 +1881,24 @@ class Agent:
                         [r for r in tool_results if r["success"]])
                     failed_tools = len(
                         [r for r in tool_results if not r["success"]])
-                    
 
                     timeout_tools = len(
                         [r for r in tool_results if r.get("timeout_occurred", False)])
                     error_tools = len(
                         [r for r in tool_results if r.get("execution_error", False)])
-                    
+
                     if timeout_tools > 0:
-                        log_warning(f"Universal timeout handler: {timeout_tools} tools timed out - agent continues execution", logger)
+                        log_warning(
+                            f"Universal timeout handler: {timeout_tools} tools timed out, agent continues execution", logger)
 
                         for result in tool_results:
                             if result.get("timeout_occurred", False):
-                                log_warning(f"Tool '{result.get('tool_name')}' hit 180s timeout - marked as failed", logger)
-                    
+                                log_warning(
+                                    f"Tool '{result.get('tool_name')}' hit 180s timeout, marked as failed", logger)
+
                     if error_tools > 0:
-                        log_warning(f"Universal error handler: {error_tools} tools had execution errors - agent continues", logger)
+                        log_warning(
+                            f"Universal error handler: {error_tools} tools had execution errors, agent continues", logger)
 
                     session_entry = {
                         "type": "tool_execution",
@@ -1826,14 +1915,14 @@ class Agent:
 
                     multi_tool_msg = f" in parallel" if len(
                         tool_calls) > 1 else ""
-                    
 
-                    status_parts = [f"successful: {successful_tools}", f"failed: {failed_tools}"]
+                    status_parts = [
+                        f"successful: {successful_tools}", f"failed: {failed_tools}"]
                     if timeout_tools > 0:
                         status_parts.append(f"timed out: {timeout_tools}")
                     if error_tools > 0:
                         status_parts.append(f"errors: {error_tools}")
-                    
+
                     status_msg = ", ".join(status_parts)
                     log_success(
                         f"Executed {len(tool_results)} tools{multi_tool_msg} in iteration {self.current_iteration} ({status_msg})", logger)
@@ -1844,7 +1933,8 @@ class Agent:
                                 tool_nm = res.get("tool_name", "unknown")
                                 params = res.get("parameters", {})
                                 err = res.get("error", "Unknown error")
-                                log_error(Exception(err), f"Tool failed: {tool_nm} | params={params}", logger)
+                                log_error(
+                                    Exception(err), f"Tool failed: {tool_nm} | params={params}", logger)
 
                 else:
 
@@ -1914,7 +2004,7 @@ class Agent:
             error_response = f"Agent execution failed: {str(e)}"
             self.save_to_conversation_history(error_response)
             return error_response
-    
+
     def _finalize_via_llm(self) -> Optional[str]:
         """Ask the LLM to synthesize a final user-facing summary with next steps.
 
@@ -1924,8 +2014,10 @@ class Agent:
 
             from prompt_manager.prompts import MAX_ITTERATION_PROMPT
 
-            session_history_json = json.dumps(self.session_history, ensure_ascii=False)
-            prompt = MAX_ITTERATION_PROMPT.replace("{session_history}", session_history_json)
+            session_history_json = json.dumps(
+                self.session_history, ensure_ascii=False)
+            prompt = MAX_ITTERATION_PROMPT.replace(
+                "{session_history}", session_history_json)
 
             response = self._call_llm(prompt, max_tokens=2048)
             if not response:
@@ -1968,6 +2060,7 @@ class Agent:
         self.planner_result = None
         self.achieved_milestones.clear()
         self.remaining_plan.clear()
+        self.milestone_map.clear()
         self.shown_progress_messages.clear()
         log_success("Agent session reset successfully", logger)
 

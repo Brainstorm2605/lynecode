@@ -11,14 +11,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import uuid
+from util.app_dirs import get_conversation_history_directory
 
 
 class ConversationHistory:
     """Manages conversation history storage and retrieval."""
 
-    def __init__(self, history_dir: str = "output/conversation_history"):
+    def __init__(self, history_dir: Optional[str] = None):
         """Initialize conversation history manager."""
-        self.history_dir = Path(history_dir)
+        if history_dir is None:
+            self.history_dir = get_conversation_history_directory()
+        else:
+            self.history_dir = Path(history_dir)
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self.conversations_index_file = self.history_dir / "conversations_index.json"
         self._ensure_index_file()
@@ -182,7 +186,8 @@ class ConversationHistory:
         if type == "folder":
             if len([a for a in conversation["attachments"] if a.get("type") == "folder"]) >= folder_cap:
                 return
-        exists = any(a.get("path") == path for a in conversation["attachments"])
+        exists = any(a.get("path") ==
+                     path for a in conversation["attachments"])
         if not exists:
             conversation["attachments"].append({
                 "type": type,

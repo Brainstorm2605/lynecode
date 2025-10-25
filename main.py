@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import shutil
+import select
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from agent.agent import Agent
@@ -806,6 +807,52 @@ def run_query(agent: Agent, query: str) -> str:
         return error_response
 
 
+def get_multiline_input(prompt_text: str = "\n> ") -> str:
+    """
+    Get user input handling multiline paste properly.
+    Reads all available input including pasted multi-line text.
+    """
+    lines = []
+
+    if os.name == 'nt':
+        import msvcrt
+        if RICH_AVAILABLE:
+            console.print(Text(prompt_text, style="bold cyan"), end="")
+        else:
+            print(get_colored_text(prompt_text, "cyan", True), end="", flush=True)
+
+        first_line = sys.stdin.readline().rstrip('\r\n')
+        lines.append(first_line)
+
+        while msvcrt.kbhit():
+            extra_line = sys.stdin.readline().rstrip('\r\n')
+            if extra_line or lines:
+                lines.append(extra_line)
+            else:
+                break
+    else:
+        if RICH_AVAILABLE:
+            console.print(Text(prompt_text, style="bold cyan"), end="")
+        else:
+            print(get_colored_text(prompt_text, "cyan", True), end="", flush=True)
+
+        first_line = sys.stdin.readline().rstrip('\n')
+        lines.append(first_line)
+
+        try:
+            while select.select([sys.stdin], [], [], 0.0)[0]:
+                extra_line = sys.stdin.readline().rstrip('\n')
+                if extra_line or lines:
+                    lines.append(extra_line)
+                else:
+                    break
+        except:
+            pass
+
+    result = '\n'.join(lines)
+    return result.strip()
+
+
 def main():
     """Main entry point for the application."""
     parser = argparse.ArgumentParser(
@@ -934,10 +981,7 @@ def main():
 
     try:
         while True:
-            prompt = Text("\n> ", style="bold cyan")
-            user_input = console.input(prompt) if RICH_AVAILABLE else input(
-                get_colored_text("\n> ", "cyan", True))
-            user_input = user_input.strip()
+            user_input = get_multiline_input("\n> ")
 
             if user_input.lower() == "quit":
                 if RICH_AVAILABLE:

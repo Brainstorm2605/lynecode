@@ -548,7 +548,7 @@ LYNE_TOOL_SPEC = [
             {"name": "auto_activate", "type": "bool", "required": False, "default": True,
                 "description": "Automatically activate local Python venv and node_modules/.bin for PATH."},
             {"name": "timeout_sec", "type": "int", "required": False, "default": 60,
-                "description": "Optional timeout override (45–60 seconds)."}
+                "description": "Optional timeout override (5–160 seconds, default 60)."}
         ],
         "use_cases": [
             "Install dependencies with pip/pnpm/npm/yarn (supports shell globbing and pipes)",
@@ -560,7 +560,7 @@ LYNE_TOOL_SPEC = [
         "when_not_to_use": [
             "Never for system level operations or commands affecting outside the project",
             "Never to execute destructive commands (blocked by guardrails)",
-            "Never run long lived/interactive servers (e.g., npm run dev, webpack --watch, gunicorn without --timeout); instead, do short checks with timeout_sec=30–45"
+            "Never run long lived/interactive servers (e.g., npm run dev, webpack --watch, gunicorn without --timeout); instead, use appropriate timeout_sec based on expected completion time"
         ]
     },
         {

@@ -54,8 +54,9 @@ class EmptyFilter(logging.Filter):
 
 
 def setup_logging():
-    log_dir = Path("log")
-    log_dir.mkdir(exist_ok=True)
+    from util.app_dirs import get_log_directory
+    log_dir = get_log_directory()
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"lyne_{timestamp}.log"
