@@ -16,7 +16,7 @@ logger = get_logger("external_terminal")
 
 
 class ExternalTerminalSession:
-    def __init__(self, working_dir: Path, env: Dict[str, Any]):
+    def __init__(self, working_dir: Path, env: Dict[str, Any], timeout_sec: int):
         self.working_dir = working_dir
         self.env = env
         self.session_dir = Path(tempfile.gettempdir()) / \
@@ -27,6 +27,7 @@ class ExternalTerminalSession:
         self.result_file = self.session_dir / "result.json"
         self.process: subprocess.Popen | None = None
         self.available = False
+        self.timeout_sec = timeout_sec
 
     def launch(self, initial_command: str) -> bool:
         try:
@@ -101,6 +102,7 @@ class ExternalTerminalSession:
     def wait_for_completion(self) -> Dict[str, Any] | None:
         if not self.available:
             return None
+        start_time = time.monotonic()
         while True:
             if self.result_file.exists():
                 try:
@@ -114,6 +116,21 @@ class ExternalTerminalSession:
                     except Exception:
                         return {"status": "unknown"}
                 return {"status": "closed"}
+            if time.monotonic() - start_time >= self.timeout_sec:
+                if self.process and self.process.poll() is None:
+                    try:
+                        self.process.terminate()
+                    except Exception:
+                        pass
+                if self.result_file.exists():
+                    try:
+                        data = json.loads(self.result_file.read_text(encoding="utf-8"))
+                        data.setdefault("status", "timeout")
+                        data.setdefault("timeout", self.timeout_sec)
+                        return data
+                    except Exception:
+                        pass
+                return {"status": "timeout", "timeout": self.timeout_sec}
             time.sleep(0.5)
 
     def cleanup(self) -> None:

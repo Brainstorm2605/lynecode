@@ -95,6 +95,125 @@ def _wrap_output(output: str) -> str:
     return f"{start}\n{output}{needs_nl}{end}"
 
 
+def _format_execution_context(command_str: str, working_dir: Path, venv_dir: Path | None, node_bins: Path | None) -> str:
+    lines = []
+    lines.append("EXECUTION CONTEXT:")
+    lines.append(f"  Command: {command_str}")
+    lines.append(f"  Working Directory: {working_dir}")
+    if venv_dir:
+        lines.append(f"  Python venv: {venv_dir}")
+    if node_bins:
+        lines.append(f"  Node bins: {node_bins}")
+    if not venv_dir and not node_bins:
+        lines.append(f"  Environment: System default")
+    return "\n".join(lines)
+
+
+def _format_terminal_result(status: str, result: dict, command_str: str, working_dir: Path, venv_dir: Path | None, node_bins: Path | None, timeout_sec: int) -> str:
+    context = _format_execution_context(
+        command_str, working_dir, venv_dir, node_bins)
+
+    if status == "cancelled":
+        return f"""USER INTERVENTION: Command execution cancelled by user
+
+        {context}
+        Status: Cancelled before execution
+
+        CRITICAL INSTRUCTIONS:
+        - User explicitly chose to cancel this command
+        - DO NOT retry this command either move forward or ask user for clarification(least preferred)
+        - DO NOT assume this is an error, user made a deliberate choice
+
+        ACTION REQUIRED: Move to next step and achieve your goal or ask user for instructions(least preferred)."""
+
+    if status == "interrupted":
+        return f"""USER INTERVENTION: Command interrupted by user (Ctrl+C)
+
+        {context}
+        Status: Interrupted during execution
+
+        CRITICAL INSTRUCTIONS:
+        - User pressed Ctrl+C to stop this running command
+        - DO NOT retry this exact command, user intentionally stopped it
+        - DO NOT run similar commands without confirming with user first
+        - This is NOT an error, user explicitly interrupted execution
+
+        ACTION REQUIRED:  Move to next step and achieve your goal or ask user for instructions(least preferred)."""
+
+    if status == "timeout":
+        output = result.get("output", "")
+        output_section = ""
+        if output and output.strip():
+            output_section = f"\n\n{_wrap_output(output)}"
+        return f"""TIMEOUT: Command exceeded time limit
+
+        {context}
+        Status: Timeout after {timeout_sec} seconds
+
+        ANALYSIS:
+        - Command did not complete within {timeout_sec} seconds
+        - This may indicate: long running process, hanging operation, or insufficient timeout
+        - Consider: increasing timeout_sec parameter, checking if command needs user input, or using different approach
+
+        ACTION REQUIRED: Adjust timeout or try alternative approach.{output_section}"""
+
+    if status == "error":
+        error_detail = result.get('error', 'unknown_error')
+        return f"""ERROR: Command execution failed
+
+        {context}
+        Status: Error
+        Error Type: {error_detail}
+
+        ANALYSIS:
+        - Command failed to execute properly
+        - Review error type and adjust command or parameters
+        - Verify command availability and syntax
+
+        ACTION REQUIRED: Fix the error and retry or try alternative approach."""
+
+    if status == "completed":
+        exit_code = result.get("exit_code", 0)
+        output = result.get("output", "")
+
+        if exit_code == 0:
+            return f"""SUCCESS: Command completed successfully
+
+        {context}
+        Exit Code: 0
+        Status: Success
+
+        {_wrap_output(output)}
+
+        RESULT: Command executed successfully. Continue to next step."""
+        else:
+            output_section = ""
+            if output and output.strip():
+                output_section = f"\n\n{_wrap_output(output)}"
+
+            return f"""ERROR: Command completed with non zero exit code
+
+        {context}
+        Exit Code: {exit_code}
+        Status: Failed
+        {output_section}
+
+        ANALYSIS:
+        - Command executed but returned exit code {exit_code}
+        - Non zero exit code typically indicates an error or failure
+        - Review the output above for error messages and details
+
+        ACTION REQUIRED: Fix the error based on output and retry."""
+
+    return f"""UNEXPECTED: Unknown terminal state
+
+        {context}
+        Status: {status}
+
+        ERROR: Unexpected session state occurred. This should not happen.
+        ACTION REQUIRED: Report this issue or try running the command again."""
+
+
 def _show_session_window(command_str: str, working_dir: Path, venv_dir: Path | None, node_bins: Path | None) -> None:
     info_lines = []
     info_lines.append(("Command", command_str))
@@ -317,11 +436,17 @@ class InteractiveTerminalSession:
         status = result.get("status")
         if status == "completed":
             exit_code = result.get("exit_code", 0)
-            message = result.get(
-                "message", "Command executed in external terminal.")
-            return {"status": "completed", "exit_code": exit_code, "output": message}
+            output = result.get("output")
+            if output is None:
+                output = result.get(
+                    "message", "Command executed in external terminal.")
+            return {"status": "completed", "exit_code": exit_code, "output": output}
         if status == "cancelled":
             return {"status": "cancelled"}
+        if status == "timeout":
+            timeout_val = result.get("timeout")
+            output = result.get("output", "")
+            return {"status": "timeout", "timeout": timeout_val, "output": output}
         if status == "interrupted":
             return {"status": "interrupted"}
         if status == "error":
@@ -337,17 +462,58 @@ def run_terminal_command(command, path: str, auto_activate: bool = True, timeout
         if not path:
             raise ValueError("path is required")
         working_dir = Path(path).resolve()
+        command_str = build_command_str(
+            command) if not isinstance(command, str) else command
+
         if not _is_within_path(working_dir, project_root):
-            error = f"Tried to run this command {command} on this path {path} but it encounter this error path_outside_project"
-            return error
+            context = _format_execution_context(
+                command_str, working_dir, None, None)
+            return f"""ERROR: Path outside project boundary
+
+            {context}
+            Status: Validation failed
+            Error Type: path_outside_project
+
+            ANALYSIS:
+            - The specified working directory is outside the project root
+            - Terminal commands can only be executed within the project directory for security
+            - Project root: {project_root}
+
+            ACTION REQUIRED: Use a path within the project directory."""
+
         if not working_dir.exists() or not working_dir.is_dir():
-            error = f"Tried to run this command {command} on this path {path} but it encounter this error invalid_path"
-            return error
+            context = _format_execution_context(
+                command_str, working_dir, None, None)
+            return f"""ERROR: Invalid working directory
+
+            {context}
+            Status: Validation failed
+            Error Type: invalid_path
+
+            ANALYSIS:
+            - The specified path does not exist or is not a directory
+            - Verify the path exists and is accessible
+
+            ACTION REQUIRED: Use a valid directory path."""
+
         argv = parse_command(command)
         command_str = build_command_str(command)
         constraint_error = check_command_constraints(argv, project_root)
         if constraint_error:
-            return f"Tried to run this command {command} on this path {path} but it encounter this error {constraint_error}"
+            context = _format_execution_context(
+                command_str, working_dir, None, None)
+            return f"""ERROR: Command violates security constraints
+
+            {context}
+            Status: Validation failed
+            Error Type: {constraint_error}
+
+            ANALYSIS:
+            - The command failed security validation
+            - Certain dangerous or system-level commands are restricted
+            - This protects the system and project from harmful operations
+
+            ACTION REQUIRED: Use a safer alternative command or approach."""
         venv_dir = None
         node_bins = None
         env = os.environ.copy()
@@ -372,26 +538,26 @@ def run_terminal_command(command, path: str, auto_activate: bool = True, timeout
                 timeout_sec = 60
         timeout_sec = max(5, min(timeout_sec, 160))
 
-        external_session = ExternalTerminalSession(working_dir, env)
+        external_session = ExternalTerminalSession(
+            working_dir, env, timeout_sec)
         session = InteractiveTerminalSession(
             command_str, argv, working_dir, env, project_root, timeout_sec, venv_dir, node_bins, external_session)
         result = session.start()
         status = result.get("status")
-        if status == "cancelled":
-            return f"Tried to run this command {command} on this path {path} but it encounter this error cancelled_by_user"
-        if status == "timeout":
-            return f"Tried to run this command {command} on this path {path} but it encounter this error timeout_{timeout_sec}s"
-        if status == "interrupted":
-            return f"Tried to run this command {command} on this path {path} but it encounter this error interrupted_by_user"
-        if status == "error":
-            return f"Tried to run this command {command} on this path {path} but it encounter this error {result.get('error', 'unknown_error')}"
-        if status == "completed":
-            exit_code = result.get("exit_code", 0)
-            output = result.get("output", "")
-            if exit_code == 0:
-                return _wrap_output(output)
-            return f"Tried to run this command {command} on this path {path} but it encounter this error exit_code_{exit_code}"
-        return f"Tried to run this command {command} on this path {path} but it encounter this error unexpected_session_state"
+        return _format_terminal_result(status, result, command_str, working_dir, venv_dir, node_bins, timeout_sec)
     except Exception as e:
         log_error(e, "run_terminal_command unexpected failure", logger)
-    return f"Tried to run this command {command} on this path {path} but it encounter this error {str(e)}"
+        context = _format_execution_context(command if isinstance(command, str) else str(
+            command), Path(path) if path else Path.cwd(), None, None)
+        return f"""ERROR: Unexpected failure in terminal command execution
+
+        {context}
+        Status: Exception
+        Error: {str(e)}
+
+        ANALYSIS:
+        - An unexpected error occurred while trying to execute the command
+        - This is an internal error, not related to the command itself
+        - Review the error message above for details
+
+        ACTION REQUIRED: Report this issue or try a different approach."""

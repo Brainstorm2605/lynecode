@@ -1,4 +1,3 @@
-from util.logging import get_logger, log_error
 import argparse
 import json
 import os
@@ -10,6 +9,8 @@ from pathlib import Path
 lynecode_root = Path(__file__).parent.parent
 if str(lynecode_root) not in sys.path:
     sys.path.insert(0, str(lynecode_root))
+
+from util.logging import get_logger, log_error
 
 
 logger = get_logger("external_terminal_runner")
@@ -37,6 +38,14 @@ def read_exit_code(path: Path) -> int:
         return 0
 
 
+def _safe_input(prompt: str) -> None:
+    """Attempt to read input; swallow EOFError when stdin unavailable."""
+    try:
+        input(prompt)
+    except EOFError:
+        pass
+
+
 def main() -> None:
     try:
         _main_impl()
@@ -44,7 +53,7 @@ def main() -> None:
         print(f"\n[ERROR] Fatal error in terminal runner: {exc}")
         import traceback
         traceback.print_exc()
-        input("\nPress Enter to close...")
+        _safe_input("\nPress Enter to close...")
 
 
 def _main_impl() -> None:
@@ -65,7 +74,7 @@ def _main_impl() -> None:
         if not directory.exists():
             write_json(result_file, {"status": "error",
                        "error": f"missing_dir:{directory}"})
-            input(
+            _safe_input(
                 f"\n[ERROR] Directory does not exist: {directory}\nPress Enter to close...")
             return
 
@@ -87,7 +96,7 @@ def _main_impl() -> None:
         if cancel_file.exists():
             print("\n[CANCELLED] Session cancelled by agent.")
             write_json(result_file, {"status": "cancelled"})
-            input("\nPress Enter to close...")
+            _safe_input("\nPress Enter to close...")
             return
 
         latest_file_command = read_text(command_file)
@@ -106,7 +115,7 @@ def _main_impl() -> None:
                 print(f"\n[EXIT CODE: {read_exit_code(result_file)}]")
             else:
                 print(f"\n[STATUS: {status.upper()}]")
-            input("\nPress Enter to close...")
+            _safe_input("\nPress Enter to close...")
             return
 
         time.sleep(0.2)
@@ -128,12 +137,31 @@ def execute_command(command: str, working_dir: Path, result_file: Path) -> str:
             shell_argv,
             cwd=str(working_dir),
             stdin=None,
-            stdout=None,
-            stderr=None
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1
         )
+
+        collected_output: list[str] = []
+        if proc.stdout:
+            for line in proc.stdout:
+                print(line, end="")
+                collected_output.append(line)
+            proc.stdout.close()
+
         proc.wait()
-        write_json(result_file, {"status": "completed",
-                   "exit_code": proc.returncode})
+        full_output = ''.join(collected_output)
+        write_json(
+            result_file,
+            {
+                "status": "completed",
+                "exit_code": proc.returncode,
+                "output": full_output,
+            },
+        )
         return "completed"
     except KeyboardInterrupt:
         print("\n[INTERRUPTED]")

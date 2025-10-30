@@ -964,26 +964,54 @@ class Agent:
 
             try:
                 if isinstance(parameters, dict):
-                    result = await asyncio.wait_for(
+                    raw_result = await asyncio.wait_for(
                         asyncio.to_thread(tool_function, **parameters),
                         timeout=timeout_seconds
                     )
                 else:
-                    result = await asyncio.wait_for(
+                    raw_result = await asyncio.wait_for(
                         asyncio.to_thread(tool_function, parameters),
                         timeout=timeout_seconds
                     )
 
-                log_success(
-                    f"Tool '{tool_name}' executed successfully", logger)
-                return {
+                success_flag = True
+                formatted_result = raw_result
+                extra_payload: Dict[str, Any] = {}
+
+                if isinstance(raw_result, (tuple, list)) and raw_result:
+                    status_value = raw_result[0]
+                    if isinstance(status_value, bool):
+                        success_flag = status_value
+                        if len(raw_result) > 1:
+                            formatted_result = raw_result[1]
+                        else:
+                            formatted_result = ""
+                        if len(raw_result) > 2:
+                            extra_payload["extra"] = list(raw_result[2:])
+                elif isinstance(raw_result, dict) and "success" in raw_result and isinstance(raw_result["success"], bool):
+                    success_flag = raw_result["success"]
+                    formatted_result = raw_result.get("result")
+                    if formatted_result is None:
+                        formatted_result = raw_result.get("message", raw_result)
+                    extra_payload["raw"] = raw_result
+
+                log_message = "executed successfully" if success_flag else "reported failure"
+                log_func = log_success if success_flag else log_warning
+                log_func(
+                    f"Tool '{tool_name}' {log_message}", logger)
+
+                result_payload = {
                     "tool_name": tool_name,
-                    "success": True,
-                    "result": result,
+                    "success": success_flag,
+                    "result": formatted_result,
                     "parameters": parameters,
                     "timeout_used": timeout_seconds,
                     "auto_corrected": validation_result.get("auto_corrected", False)
                 }
+                if extra_payload:
+                    result_payload.update(extra_payload)
+
+                return result_payload
 
             except asyncio.TimeoutError:
 
